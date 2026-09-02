@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "db:migrate": "dotenv -e .env.local -- tsx scripts/migrate.ts"
+    "db:migrate": "dotenv -e .env.local -- tsx scripts/migrate.ts",
+    "db:smoke": "dotenv -e .env.local -- tsx scripts/db-smoke.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

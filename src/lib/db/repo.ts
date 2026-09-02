@@ -18,6 +18,38 @@ import { getSql } from "./client";
 
 type Row = Record<string, unknown>;
 
+/**
+ * Formats a `date` column back to `YYYY-MM-DD`.
+ *
+ * Two traps here, both of which silently corrupt a value trend:
+ *
+ * 1. The driver returns a JS Date, not a string, so `String(value)` yields
+ *    "Sat Jan 01 2000 …" and slicing ten characters gives "Sat Jan 01".
+ * 2. That Date is built in *local* time, so 2000-01-01 becomes
+ *    1999-12-31T23:00:00Z under a positive UTC offset. Calling `toISOString`
+ *    would therefore report the previous day.
+ *
+ * So the local calendar components are read, never the UTC ones.
+ */
+function isoDay(value: unknown): string {
+  if (value instanceof Date) {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, "0");
+    const day = String(value.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+  const text = String(value);
+  if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10);
+  return text;
+}
+
+function isoInstant(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return value.toISOString();
+  const parsed = new Date(String(value));
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
 /** ISO date in Europe/Madrid, which is the day boundary the league runs on. */
 export function today(now: Date = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -238,7 +270,7 @@ export async function getValueHistory(
       AND snapshot_date >= CURRENT_DATE - ${days}::int
     ORDER BY snapshot_date DESC`) as Row[];
   return rows.map((r) => ({
-    date: String(r.snapshot_date).slice(0, 10),
+    date: isoDay(r.snapshot_date),
     value: r.value === null ? null : Number(r.value),
     points: r.points === null ? null : Number(r.points),
   }));
@@ -456,7 +488,7 @@ function toRoundRow(r: Row): RoundRow {
     roundId: String(r.round_id),
     number: Number(r.number),
     status: String(r.status),
-    deadline: r.deadline ? new Date(String(r.deadline)).toISOString() : null,
+    deadline: isoInstant(r.deadline),
   };
 }
 
@@ -508,7 +540,7 @@ export async function getFixtureDifficulty(): Promise<
 
     out.set(String(r.team_id), {
       difficulty,
-      kickoff: r.kickoff ? new Date(String(r.kickoff)).toISOString() : null,
+      kickoff: isoInstant(r.kickoff),
       opponent: r.opponent as string | null,
     });
   }
@@ -892,6 +924,6 @@ export async function getRecentActions(limit = 25): Promise<ActionLogRow[]> {
     target: r.target as string | null,
     ok: Boolean(r.ok),
     error: r.error as string | null,
-    createdAt: new Date(String(r.created_at)).toISOString(),
+    createdAt: isoInstant(r.created_at) ?? "",
   }));
 }
