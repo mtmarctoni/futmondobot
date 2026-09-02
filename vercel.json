@@ -1,8 +1,12 @@
 {
   "crons": [
     {
+      "path": "/api/cron/sync",
+      "schedule": "0 6,14,22 * * *"
+    },
+    {
       "path": "/api/cron/deadline",
-      "schedule": "0 18 * * *"
+      "schedule": "0 9,18 * * *"
     }
   ]
 }

@@ -1,27 +1,44 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runAnalysis } from "@/lib/engine";
-import { formatReportMessage, notify } from "@/lib/telegram";
+import { authFailureReason, isAuthorizedRequest } from "@/lib/auth";
+import { runAutomation } from "@/lib/automation";
+import { sendReport } from "@/lib/telegram";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
+/**
+ * The decision cron: set the lineup, block exposed clauses, then send the
+ * remaining money decisions to Telegram as buttons.
+ */
 export async function GET(req: NextRequest) {
-  try {
-    const auth = process.env.CRON_SECRET;
-    const header = req.headers.get("authorization") ?? "";
-    if (auth && header !== `Bearer ${auth}`) {
-      return NextResponse.json({ ok: false }, { status: 401 });
-    }
-
-    const report = await runAnalysis();
-    const msg = formatReportMessage(report);
-    const { sent } = await notify(msg);
-    return NextResponse.json({ ok: true, sent, headline: report.today.headline });
-  } catch (err) {
+  if (!isAuthorizedRequest(req)) {
     return NextResponse.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
-      { status: 500 },
+      { ok: false, error: authFailureReason() },
+      { status: 401 },
     );
   }
+
+  const dryRun = req.nextUrl.searchParams.get("dryRun") === "1";
+  const result = await runAutomation({ dryRun });
+
+  let sent = 0;
+  let notifyError: string | null = null;
+  try {
+    // Telegram failing must not hide that the lineup was written.
+    ({ sent } = await sendReport(result.report));
+  } catch (err) {
+    notifyError = err instanceof Error ? err.message : String(err);
+  }
+
+  return NextResponse.json({
+    ok: true,
+    dryRun,
+    sent,
+    notifyError,
+    headline: result.report.today.headline,
+    lineup: result.lineup,
+    locks: result.locks,
+    notes: result.notes,
+  });
 }

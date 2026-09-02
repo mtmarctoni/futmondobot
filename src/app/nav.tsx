@@ -5,6 +5,7 @@ const links: { href: string; label: string }[] = [
   { href: "/lineup", label: "Lineup" },
   { href: "/market", label: "Market" },
   { href: "/clauses", label: "Clauses" },
+  { href: "/rivals", label: "Rivals" },
   { href: "/settings", label: "Settings" },
 ];
 

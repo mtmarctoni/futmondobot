@@ -1,129 +1,273 @@
-import { isFixtureDifficult } from "../stats/apiFootball";
-import { fmtMoney } from "./clauses";
-import type { ClauseReport } from "./clauses";
-import type { LineupResult } from "./lineup";
+/**
+ * The one screen worth reading: what to do right now, in order.
+ *
+ * Ordering is by consequence, not by category. A lineup with an injured
+ * starter in it costs points this week and outranks any transfer; a clause
+ * block costs nothing and is therefore always worth doing; a marginal buy can
+ * wait. Anything that needs no action is deliberately not listed.
+ */
+import type { ClauseReport, ExposedPlayer, StealCandidate } from "./clauses";
+import type { LineupChange, LineupPick } from "./lineup";
 import type { MarketReport } from "./market";
+import { fmtMoney, type LeagueRules } from "./types";
+
+export type ActionKind =
+  | "set_lineup"
+  | "lock_player"
+  | "steal_clause"
+  | "buy"
+  | "sell"
+  | "info";
 
 export interface Action {
   id: string;
-  kind: "set_lineup" | "buy" | "sell" | "steal" | "info";
-  priority: "high" | "medium" | "low";
+  kind: ActionKind;
+  /** Sort key. Higher acts sooner. */
+  weight: number;
+  urgency: "now" | "today" | "whenever";
   title: string;
   detail: string;
+  /** Points per round at stake, where the action has a points effect. */
+  pointsAtStake?: number;
+  /** Euros involved, where the action costs or frees money. */
+  money?: number;
   playerId?: string;
   playerName?: string;
-  ref?: string;
+  /** Set when the app can carry the action out itself. */
+  automatable?: boolean;
 }
 
 export interface TodayReport {
   actions: Action[];
   headline: string;
-  deadline?: string;
+  deadline: string | null;
+  hoursToDeadline: number | null;
+  /** Points per round currently being left on the table. */
+  pointsAvailable: number;
 }
 
 export interface TodayInput {
-  lineup: LineupResult;
+  lineup: LineupPick;
+  lineupChanges: LineupChange[];
+  /** True when the app already applied the lineup. */
+  lineupApplied: boolean;
   market: MarketReport;
   clauses: ClauseReport;
-  deadline?: string;
-  fixtureWindow?: number;
-  fixtureDifficulty?: Record<string, { difficulty: number }>;
+  deadline: string | null;
+  rules: LeagueRules;
+  now?: Date;
 }
 
-export function buildTodayActions(input: TodayInput): TodayReport {
+export function buildToday(input: TodayInput): TodayReport {
+  const now = input.now ?? new Date();
+  const hoursToDeadline = input.deadline
+    ? (new Date(input.deadline).getTime() - now.getTime()) / 3_600_000
+    : null;
+
   const actions: Action[] = [];
 
-  // 1. Set lineup (highest priority)
-  const readyCount = input.lineup.players.length;
-  const need = input.lineup.formation.reduce((a, b) => a + b, 0);
-  if (readyCount < need) {
-    actions.push({
-      id: "lineup",
-      kind: "set_lineup",
-      priority: "high",
-      title: `Set your lineup — ${readyCount}/${need} slots ready`,
-      detail: input.lineup.lineupMessage,
-    });
-  } else {
-    actions.push({
-      id: "lineup",
-      kind: "set_lineup",
-      priority: "high",
-      title: `Set lineup (${input.lineup.formation.join("-")})`,
-      detail: input.lineup.lineupMessage,
-    });
+  actions.push(...lineupActions(input, hoursToDeadline));
+  actions.push(...lockActions(input.clauses.toLock));
+  actions.push(...stealActions(input.clauses.steals, input.rules));
+  actions.push(...marketActions(input.market));
+
+  actions.sort((a, b) => b.weight - a.weight);
+
+  const pointsAvailable = input.lineupChanges.reduce(
+    (sum, c) => sum + Math.max(0, c.gain),
+    0,
+  );
+
+  return {
+    actions,
+    headline: buildHeadline(actions, input, hoursToDeadline),
+    deadline: input.deadline,
+    hoursToDeadline,
+    pointsAvailable,
+  };
+}
+
+function lineupActions(
+  input: TodayInput,
+  hoursToDeadline: number | null,
+): Action[] {
+  const { lineup, lineupChanges, lineupApplied } = input;
+
+  if (lineup.starters.length === 0) {
+    return [
+      {
+        id: "lineup-nodata",
+        kind: "info",
+        weight: 90,
+        urgency: "today",
+        title: "No squad data yet",
+        detail: "Run a sync so the engine can see your players.",
+      },
+    ];
   }
 
-  // 2. Clause steal (high) — rivals
-  const topSteal = input.clauses.steals[0];
-  if (topSteal) {
-    actions.push({
-      id: "steal",
-      kind: "steal",
-      priority: topSteal.stealScore >= 70 ? "high" : "medium",
-      title: `Steal ${topSteal.name} from ${topSteal.ownerName}`,
-      detail: `Clause ${fmtMoney(topSteal.clause)} for ${topSteal.avgLastFive.toFixed(1)} avg pts last 5 — score ${topSteal.stealScore}.`,
-      playerId: topSteal.id,
-      playerName: topSteal.name,
-    });
+  // Deadline pressure is what makes a lineup change urgent rather than merely
+  // beneficial: after kickoff the same change is worth nothing.
+  const urgent = hoursToDeadline !== null && hoursToDeadline <= 24;
+
+  if (lineupApplied) {
+    return [
+      {
+        id: "lineup-done",
+        kind: "info",
+        weight: 40,
+        urgency: "whenever",
+        title: `Lineup set: ${lineup.formation.label}`,
+        detail: `${lineup.summary} Applied automatically.`,
+        pointsAtStake: 0,
+      },
+    ];
   }
 
-  // 3. Market buy (medium/high)
-  const topBuy = input.market.buys[0];
+  if (lineupChanges.length === 0) {
+    return [
+      {
+        id: "lineup-ok",
+        kind: "info",
+        weight: 30,
+        urgency: "whenever",
+        title: `Lineup already optimal (${lineup.formation.label})`,
+        detail: lineup.summary,
+        pointsAtStake: 0,
+      },
+    ];
+  }
+
+  const gain = lineupChanges.reduce((sum, c) => sum + Math.max(0, c.gain), 0);
+  const injuredIn = lineupChanges.some((c) => c.playerOut.unavailableReason);
+
+  // An injured starter is the single most expensive mistake available, so it
+  // outranks everything including a large clause bargain.
+  const weight = injuredIn ? 100 : urgent ? 95 : 70 + Math.min(20, gain * 4);
+
+  return [
+    {
+      id: "lineup",
+      kind: "set_lineup",
+      weight,
+      urgency: urgent || injuredIn ? "now" : "today",
+      title: injuredIn
+        ? `Fix the lineup — an unavailable player is in your XI`
+        : `Change ${lineupChanges.length} lineup slot${lineupChanges.length > 1 ? "s" : ""} for +${gain.toFixed(1)} pts`,
+      detail: `${lineup.summary} ${lineupChanges
+        .slice(0, 4)
+        .map((c) => c.reason)
+        .join("; ")}.`,
+      pointsAtStake: gain,
+      automatable: true,
+    },
+  ];
+}
+
+/**
+ * Blocking is free and irreversible only in the sense that it can be undone at
+ * will, so anything genuinely exposed is worth doing immediately.
+ */
+function lockActions(toLock: ExposedPlayer[]): Action[] {
+  return toLock.slice(0, 3).map((risk, index) => ({
+    id: `lock-${risk.player.playerId}`,
+    kind: "lock_player" as const,
+    // Just below a broken lineup: costs nothing, prevents losing a starter.
+    weight: 88 - index,
+    urgency: "now" as const,
+    title: `Block ${risk.player.name}'s clause`,
+    detail: `${risk.reason} Blocking costs nothing and this league allows unlimited blocks.`,
+    money: 0,
+    playerId: risk.player.playerId,
+    playerName: risk.player.name,
+    automatable: true,
+  }));
+}
+
+function stealActions(steals: StealCandidate[], rules: LeagueRules): Action[] {
+  return steals
+    .filter((s) => s.affordable)
+    .slice(0, 3)
+    .map((steal, index) => {
+      const weeklyReturn = steal.upgrade * rules.pricePerPoint;
+      return {
+        id: `steal-${steal.player.playerId}`,
+        kind: "steal_clause" as const,
+        weight: 80 - index * 2 + Math.min(10, steal.upgrade * 3),
+        urgency: "today" as const,
+        title: `Pay ${steal.player.name}'s clause — ${fmtMoney(steal.clausePrice)}`,
+        detail: `${steal.reason} Worth roughly ${fmtMoney(weeklyReturn)} a round in prize money${
+          steal.ownerName ? `. Currently at ${steal.ownerName}` : ""
+        }.`,
+        pointsAtStake: steal.upgrade,
+        money: -steal.clausePrice,
+        playerId: steal.player.playerId,
+        playerName: steal.player.name,
+      };
+    });
+}
+
+function marketActions(market: MarketReport): Action[] {
+  const actions: Action[] = [];
+
+  const topBuy = market.buys.find((b) => b.affordable);
   if (topBuy) {
     actions.push({
-      id: "buy",
+      id: `buy-${topBuy.player.playerId}`,
       kind: "buy",
-      priority: "medium",
-      title: `Buy ${topBuy.player.name} (${topBuy.player.role})`,
+      weight: 60 + Math.min(15, topBuy.upgrade * 4),
+      urgency: "today",
+      title: `Bid on ${topBuy.player.name} — ${fmtMoney(topBuy.price)}`,
       detail: topBuy.reason,
-      playerId: topBuy.player.id,
+      pointsAtStake: topBuy.upgrade,
+      money: -topBuy.price,
+      playerId: topBuy.player.playerId,
       playerName: topBuy.player.name,
     });
   }
 
-  // 4. Market sell (medium)
-  const topSell = input.market.sells[0];
-  if (topSell) {
+  // Selling matters most when it is free and unlocks something better.
+  for (const [index, sell] of market.sells.filter((s) => s.cost === 0).slice(0, 2).entries()) {
     actions.push({
-      id: "sell",
+      id: `sell-${sell.player.playerId}`,
       kind: "sell",
-      priority: "medium",
-      title: `Sell ${topSell.player.name} (${topSell.player.role})`,
-      detail: topSell.reason,
-      playerId: topSell.player.id,
-      playerName: topSell.player.name,
+      weight: 50 - index,
+      urgency: "whenever",
+      title: `Sell ${sell.player.name} — ${fmtMoney(sell.player.value)}`,
+      detail: sell.reason,
+      pointsAtStake: 0,
+      money: sell.player.value,
+      playerId: sell.player.playerId,
+      playerName: sell.player.name,
     });
   }
 
-  // 5. Hard-fixture warning (info)
-  const difficultTeams = Object.entries(input.fixtureDifficulty ?? {}).filter(
-    ([, v]) => isFixtureDifficult({ teamId: 0, teamName: "", difficulty: v.difficulty, homeNext: 0, awayNext: 0 }, 1.6),
-  );
-  if (difficultTeams.length > 0 && input.lineup.players.length > 0) {
-    const affected = input.lineup.players
-      .filter((p) => difficultTeams.some(([t]) => t === p.team))
-      .slice(0, 3)
-      .map((p) => p.name);
-    if (affected.length > 0) {
-      actions.push({
-        id: "hard_fixtures",
-        kind: "info",
-        priority: "low",
-        title: "Tough upcoming fixtures",
-        detail: `Consider benching: ${affected.join(", ")}.`,
-      });
-    }
+  return actions;
+}
+
+function buildHeadline(
+  actions: Action[],
+  input: TodayInput,
+  hoursToDeadline: number | null,
+): string {
+  const deadlineNote =
+    hoursToDeadline === null
+      ? ""
+      : hoursToDeadline < 0
+        ? " The round has already started."
+        : hoursToDeadline < 48
+          ? ` Deadline in ${formatHours(hoursToDeadline)}.`
+          : "";
+
+  const top = actions.find((a) => a.kind !== "info");
+  if (!top) {
+    return `Nothing to do.${deadlineNote || ` ${input.lineup.summary}`}`;
   }
+  return `${top.title}.${deadlineNote}`;
+}
 
-  const priorityOrder = { high: 0, medium: 1, low: 2 } as const;
-  actions.sort((a, b) => priorityOrder[a.priority] - priorityOrder[b.priority]);
-
-  const headline = [
-    `Lineup: ${input.lineup.formation.join("-")}`,
-    topSteal ? `Steal ${topSteal.name}` : "No steals",
-    topBuy ? `Buy ${topBuy.player.name}` : "No buys",
-  ].join(" · ");
-
-  return { actions, headline, deadline: input.deadline };
+function formatHours(hours: number): string {
+  if (hours < 1) return `${Math.round(hours * 60)} minutes`;
+  if (hours < 24) return `${Math.round(hours)} hours`;
+  return `${Math.round(hours / 24)} days`;
 }

@@ -1,17 +1,17 @@
 import type { Metadata } from "next";
 import { runAnalysis } from "@/lib/engine";
-import { DashboardClient } from "./dashboard-client";
+import { RivalsClient } from "./rivals-client";
 
 export const metadata: Metadata = {
-  title: "Today — FutmondoBot",
+  title: "Rivals — FutmondoBot",
 };
 
 // The report reads live Futmondo state, so it must never be prerendered.
 export const dynamic = "force-dynamic";
 
-export default async function TodayPage() {
+export default async function RivalsPage() {
   // Running the engine here rather than through /api/analyze means the page
   // arrives with its data and no client round trip.
   const report = await runAnalysis();
-  return <DashboardClient initial={report} />;
+  return <RivalsClient initial={report} />;
 }
