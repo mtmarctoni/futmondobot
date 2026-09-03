@@ -101,7 +101,24 @@ export async function applyLineup(args: {
 
   const moves = planMoves(currentLineup, inShape);
   if (moves.length === 0) {
-    result.skippedReason = "The lineup already matches the best selection.";
+    // An empty pitch slot is not the same as an optimal lineup, and saying so
+    // was the worst failure this writer had: with seven of eleven slots filled
+    // and an empty bench there is nobody to promote, so planMoves returns
+    // nothing and the old message claimed the XI was already best. Filling an
+    // empty slot from an unassigned squad player is not a move this code can
+    // make -- moveplayer addresses pitch and bench positions, and an
+    // unassigned player has neither -- so the honest answer is to say it needs
+    // a human.
+    const required =
+      1 + currentFormation.DEF + currentFormation.MED + currentFormation.DEL;
+    const filled = currentLineup.players.filter(
+      (slot) => slot.position !== undefined,
+    ).length;
+
+    result.skippedReason =
+      filled < required
+        ? `Only ${filled} of the ${required} ${currentFormation.label} slots are filled and the bench is empty, so there is nobody to promote. Automation can swap a starter for a substitute but cannot place an unassigned player into an empty slot -- fill these by hand.`
+        : "The lineup already matches the best selection.";
     return result;
   }
 
