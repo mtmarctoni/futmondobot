@@ -217,16 +217,58 @@ function basePlayer(raw: Rec): Player | null {
   };
 }
 
+/**
+ * `clause` on a roster row is an object, not a number:
+ * `{price, date, transferred, suggestedClause}`. Reading it with `num()`
+ * returned undefined for every player, so the roster never contributed a
+ * clause price and the engine relied entirely on the far more expensive
+ * per-player summary sync. Both shapes are accepted now.
+ */
+function clauseOf(raw: Rec): { price?: number; locked?: boolean } {
+  const field = pick(raw, "clause", "clausePrice", "clause_price");
+  if (isRec(field)) {
+    return {
+      price: num(pick(field, "price", "value")),
+      locked: bool(pick(field, "locked", "isLocked", "blocked")),
+    };
+  }
+  return {
+    price: num(field),
+    locked: bool(pick(raw, "locked", "isLocked", "blocked")),
+  };
+}
+
+/**
+ * Whether the player is already listed for sale, and at what price.
+ *
+ * `market` is `false` for a player who is not listed and an object when they
+ * are, so a truthiness check on the field itself is the shape test.
+ */
+function listingOf(raw: Rec): { onMarket: boolean; askPrice?: number } {
+  const field = pick(raw, "market");
+  if (!isRec(field)) return { onMarket: false };
+  const inMarket = bool(pick(field, "inMarket", "in_market", "onMarket"));
+  const price = num(pick(field, "price", "askPrice", "p"));
+  // An object with a price but no flag still means listed; the flag is the
+  // stronger signal when present.
+  const onMarket = inMarket ?? price !== undefined;
+  return { onMarket, askPrice: price };
+}
+
 export function parseRoster(answer: unknown): RosterPlayer[] {
   const out: RosterPlayer[] = [];
   for (const raw of asArray(answer, "players", "roster")) {
     const base = basePlayer(raw);
     if (!base) continue;
+    const clause = clauseOf(raw);
+    const listing = listingOf(raw);
     out.push({
       ...base,
       buyPrice: num(pick(raw, "buyPrice", "buy_price", "purchasePrice")),
-      clause: num(pick(raw, "clause", "clausePrice", "clause_price")),
-      locked: bool(pick(raw, "locked", "isLocked", "blocked")),
+      clause: clause.price,
+      locked: clause.locked ?? bool(pick(raw, "locked", "isLocked", "blocked")),
+      onMarket: listing.onMarket,
+      askPrice: listing.askPrice,
     });
   }
   return out;

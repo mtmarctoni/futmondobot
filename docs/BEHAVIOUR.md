@@ -160,12 +160,50 @@ threat, so this is what decides which of your players are worth blocking.
 
 1. An unavailable player in the XI — the most expensive mistake available.
 2. A lineup change inside 24 hours of the deadline.
-3. A clause block, because it is free.
-4. A clause steal, weighted by the upgrade.
-5. A buy, then a sell.
+3. A player who has left the competition, because the loss compounds daily.
+4. A clause block, because it is free.
+5. A clause steal, weighted by the upgrade.
+6. A buy, then a sell.
 
 Anything that needs no action is deliberately not listed. Each entry carries the
 points at stake and the money involved, so the cost of ignoring it is visible.
+
+## Players who have left the competition
+
+`src/lib/engine/departed.ts`.
+
+A real-world transfer out of the league does not remove a player from Futmondo.
+He keeps his squad slot, his market value and his clause price, his card looks
+like everyone else's, and he can still be picked — he simply never scores
+again. It is the only mistake in this game that is invisible from inside
+Futmondo, which is why it gets its own check and its own banner rather than a
+line in a list.
+
+No field says "gone". The signal is the calendar: **a club is in the
+competition if and only if it has fixtures**, so a player whose club has none
+has left. That reads the transfer the day Futmondo updates his club, instead of
+waiting for rounds of zeroes to drag his average down.
+
+A false positive here tells you to dump a good player, so the check refuses to
+guess:
+
+- It needs at least 18 clubs in the stored calendar. Below that, a missing
+  fixture means the sync has not run.
+- It refuses to fire at all if it would flag more than a fifth of the league —
+  the shape of a calendar synced for the wrong competition. It warns instead.
+- A player with no club id is unknown, not departed.
+
+A departure is fed into the same availability map as an injury, so it reaches
+every decision at once: start probability zero, out of the XI, out of the
+clause-steal candidates (which is what stops a rival's departed player looking
+like a bargain on a low clause and a stale average), and into the sell list as
+dead capital. It is scanned league-wide for that reason, not just for our own
+squad.
+
+Selling is never automated — it moves real money, so it stays a two-tap
+confirmation like every other money action. When the player is already listed,
+the action becomes a note rather than a sell, because the only thing left to do
+is take the best offer.
 
 ## History, and why it needs time
 

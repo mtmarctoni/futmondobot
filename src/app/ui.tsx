@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import type { AnalysisReport, Coverage } from "@/lib/engine";
+import type { AnalysisReport, Coverage, DepartedPlayer } from "@/lib/engine";
 import type { Evaluated } from "@/lib/engine/types";
 
 // ------------------------------------------------------------------ data ----
@@ -162,6 +162,44 @@ export function ErrorBox({
   );
 }
 
+/**
+ * Players who are no longer in the competition.
+ *
+ * Deliberately the loudest thing on the page and placed above the action list:
+ * Futmondo gives no hint that a player has been transferred out of the league,
+ * so this is the only place it can be seen, and it costs a squad slot plus the
+ * capital for every day it goes unnoticed.
+ */
+export function DepartedBanner({ departed }: { departed: DepartedPlayer[] }) {
+  if (departed.length === 0) return null;
+  return (
+    <div className="rounded-xl border border-rose-800 bg-rose-950/40 px-4 py-3">
+      <p className="font-medium text-rose-100">
+        {departed.length === 1
+          ? "A player has left the competition"
+          : `${departed.length} players have left the competition`}
+      </p>
+      <ul className="mt-2 space-y-2">
+        {departed.map((player) => (
+          <li key={player.playerId} className="text-sm">
+            <span className="font-medium text-rose-100">{player.name}</span>
+            <span className="text-rose-200/80">
+              {player.clubName ? ` is at ${player.clubName} now` : " is not in this league"}
+              {" — "}
+              <Money value={player.value} /> that cannot score another point.
+            </span>
+            <span className="block text-xs text-rose-300/70">
+              {player.onMarket
+                ? `Already on the market${player.askPrice !== null ? ` at ${money(player.askPrice)}` : ""}. Take the best offer rather than holding for full value.`
+                : "Sell him: he holds a squad slot and earns nothing."}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function Warnings({ warnings }: { warnings: string[] }) {
   if (warnings.length === 0) return null;
   return (
@@ -244,8 +282,13 @@ export function PlayerRow({
             {player.name}
           </span>
           {player.unavailableReason && (
-            <span className="shrink-0 rounded bg-rose-500/15 px-1.5 py-0.5 text-xs text-rose-300">
-              out
+            <span
+              className="shrink-0 rounded bg-rose-500/15 px-1.5 py-0.5 text-xs text-rose-300"
+              title={player.unavailableReason}
+            >
+              {player.unavailableReason.startsWith("no longer in the competition")
+                ? "left the league"
+                : "out"}
             </span>
           )}
           {player.clauseLocked && (

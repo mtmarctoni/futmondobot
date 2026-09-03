@@ -694,6 +694,36 @@ export async function getFixtureDifficulty(): Promise<FixtureMap> {
   return out;
 }
 
+/**
+ * Every real club taking part in the competition, id to name.
+ *
+ * Read from the stored calendar rather than from any player payload, because
+ * the calendar is the only place the competition itself is enumerated: a club
+ * appears here if and only if it has a fixture. That makes it the reference
+ * set for deciding whether a player still plays in this league at all --
+ * Futmondo keeps a transferred player on the championship roster, with a
+ * value and a clause, pointing at his new club abroad.
+ */
+export async function getCompetitionClubs(): Promise<Map<string, string>> {
+  const sql = getSql();
+  const rows = (await sql`
+    SELECT team_id, max(name) AS name
+    FROM (
+      SELECT home_team_id AS team_id, home_team AS name FROM matches
+      WHERE home_team_id IS NOT NULL
+      UNION ALL
+      SELECT away_team_id AS team_id, away_team AS name FROM matches
+      WHERE away_team_id IS NOT NULL
+    ) sides
+    GROUP BY team_id`) as Row[];
+
+  const out = new Map<string, string>();
+  for (const r of rows) {
+    out.set(String(r.team_id), (r.name as string | null) ?? "");
+  }
+  return out;
+}
+
 function num(v: unknown): number | null {
   if (v === null || v === undefined) return null;
   const n = Number(v);

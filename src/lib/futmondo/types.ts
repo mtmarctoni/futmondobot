@@ -97,10 +97,14 @@ export interface Player {
 export interface RosterPlayer extends Player {
   /** What the current owner paid. */
   buyPrice?: number;
-  /** Clause price, only known after a /1/player/summary lookup. */
+  /** Clause price. The roster row carries it nested under `clause.price`. */
   clause?: number;
   /** True when the owner has clause-blocked the player. */
   locked?: boolean;
+  /** True when the player is already listed on the market. */
+  onMarket?: boolean;
+  /** The asking price of that listing, when there is one. */
+  askPrice?: number;
 }
 
 export interface MarketPlayer extends Player {

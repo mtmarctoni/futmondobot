@@ -101,6 +101,107 @@ describe("role", () => {
   });
 });
 
+/**
+ * Captured verbatim from `/1/userteam/roster`. The hand-written fixtures below
+ * spell `clause` as a number and omit `market` entirely, which is why the
+ * roster silently contributed no clause price and no listing state for a year:
+ * the code and the fixture shared the same wrong assumption.
+ */
+const LIVE_ROSTER_ROW = {
+  id: "63a8cd87bfb65a271f11db10",
+  name: "Carlos Álvarez",
+  slug: "67291985",
+  role: "centrocampista",
+  role2: "",
+  photo: "67291985.png",
+  points: 1.8,
+  value: 18526493,
+  team: "América",
+  logo: "america.png",
+  teamId: "5200250711398189070000b4",
+  status: "",
+  rating: 4,
+  market: {
+    inMarket: true,
+    price: 18931044,
+    bids: [
+      {
+        id: "6a98f597b4d723070d417621",
+        price: 18204532,
+        userTeam: { name: "", slug: "" },
+      },
+    ],
+  },
+  direct: false,
+  average: {
+    average: 0,
+    homeAverage: 0,
+    awayAverage: 0,
+    averageLastFive: 0,
+    matches: 0,
+    fitness: [],
+  },
+  change: 0,
+  computer: false,
+  buyPrice: 0,
+  clause: {
+    price: 38228076,
+    date: "2026-09-07T18:05:10.934Z",
+    transferred: false,
+    suggestedClause: 24683383,
+  },
+};
+
+/** The same endpoint, for a player who is not listed for sale. */
+const LIVE_ROSTER_ROW_UNLISTED = {
+  ...LIVE_ROSTER_ROW,
+  id: "68966a3623f462042dbe3298",
+  name: "Ugrinic",
+  team: "Valencia",
+  teamId: "504e581e4d8bec9a670000cb",
+  market: false,
+  clause: {
+    price: 9447611,
+    date: "2026-09-07T18:05:10.924Z",
+    transferred: false,
+    suggestedClause: 4630088,
+  },
+};
+
+describe("parseRoster on a captured payload", () => {
+  it("reads the clause price out of the object the endpoint really sends", () => {
+    const [player] = parseRoster([LIVE_ROSTER_ROW]);
+    expect(player.clause).toBe(38228076);
+  });
+
+  it("reads the market listing and its asking price", () => {
+    const [player] = parseRoster([LIVE_ROSTER_ROW]);
+    expect(player.onMarket).toBe(true);
+    expect(player.askPrice).toBe(18931044);
+  });
+
+  it("reports market: false as not listed", () => {
+    const [player] = parseRoster([LIVE_ROSTER_ROW_UNLISTED]);
+    expect(player.onMarket).toBe(false);
+    expect(player.askPrice).toBeUndefined();
+    expect(player.clause).toBe(9447611);
+  });
+
+  it("keeps the real club, which is what tells us a player has left the league", () => {
+    const [player] = parseRoster([LIVE_ROSTER_ROW]);
+    expect(player.team).toBe("América");
+    expect(player.teamId).toBe("5200250711398189070000b4");
+  });
+
+  it("still accepts a flat numeric clause", () => {
+    const [player] = parseRoster([
+      { id: "p1", name: "Flat", role: "DEF", clause: 1234, locked: true },
+    ]);
+    expect(player.clause).toBe(1234);
+    expect(player.locked).toBe(true);
+  });
+});
+
 describe("parseRoster", () => {
   it("reads the documented roster shape", () => {
     const players = parseRoster([
