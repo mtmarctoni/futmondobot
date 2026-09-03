@@ -7,6 +7,17 @@ decisions that cost money to Telegram as one-tap buttons.
 Built for a **Social** league with **Mixto** scoring and manual clauses, but the
 league's own settings are read from the API rather than hardcoded.
 
+## Documentation
+
+| | |
+|---|---|
+| [What the app does](docs/BEHAVIOUR.md) | The decision model, every feature, and the limits |
+| [Configuration](docs/CONFIGURATION.md) | Every setting, the schedules, and a runbook |
+| [Architecture](docs/ARCHITECTURE.md) | Module map and data flow, for changing the code |
+| [Decisions](docs/DECISIONS.md) | Why the constraints exist, so they are not undone by accident |
+| [Futmondo API](docs/futmondo-api.md) | The private API surface and its traps |
+| [AGENTS.md](AGENTS.md) | Orientation for AI agents working in this repo |
+
 ## What it actually does
 
 | | |
@@ -160,8 +171,9 @@ src/lib/telegram/   formatting and button callbacks
 ## Notes
 
 Unofficial, and not affiliated with Futmondo. It uses their private API, which
-[docs/futmondo-api.md](docs/futmondo-api.md) documents — 166 endpoints extracted
-from the compiled web client. That file is worth reading before changing
+[docs/futmondo-api.md](docs/futmondo-api.md) documents — 173 endpoint paths
+extracted from the compiled web client, 163 of them confirmed as live request
+calls. That file is worth reading before changing
 anything in `src/lib/futmondo`; the API has several traps, notably that **errors
 come back as HTTP 200** with `answer.error: true`.
 

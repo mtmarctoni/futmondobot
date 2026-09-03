@@ -14,6 +14,28 @@ production:
 Futmondo publishes none of this. It can change without notice. Treat every response
 field as optional.
 
+## Coverage of this document
+
+The bundle contains **173 distinct endpoint paths**, 163 of which are reachable
+through the client's request helper. The tables below document the ~74 this app
+uses or could plausibly use, with their query shapes and the parts of `answer`
+we rely on. The rest — championship administration, cups, head-to-head, shop,
+notifications, profile management — are listed by name under
+[Other](#other) without detail.
+
+An endpoint missing from the tables is therefore not necessarily missing from the
+API. To re-derive the full list:
+
+```bash
+curl -s https://app.futmondo.com/main.dart.js \
+  | grep -oE '"/[0-9]{1,2}/[A-Za-z_][A-Za-z0-9_]*(/[A-Za-z_][A-Za-z0-9_]*)*"' \
+  | sort -u
+```
+
+Query shapes come from the `A.aE("<path>", A.l([...]))` call sites in the same
+file. dart2js preserves string literals, so JSON keys survive minification even
+though identifiers do not.
+
 ## Transport
 
 Base URL `https://api.futmondo.com`. Every call is a `POST` with a JSON envelope:
