@@ -15,7 +15,7 @@ import * as repo from "../db/repo";
 import { dbTokenStore } from "../db/token-store";
 import { FutmondoClient, type Scope } from "../futmondo/client";
 import { FutmondoError } from "../futmondo/errors";
-import type { FutmondoRole } from "../futmondo/types";
+import type { FutmondoRole, PlayerStats } from "../futmondo/types";
 import { runClauses, type ClauseReport } from "./clauses";
 import { evaluate, type EvaluateContext } from "./expected";
 import {
@@ -171,6 +171,7 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
         // Prefer the stored clause: the roster payload rarely carries one.
         clausePrice: p.clause ?? history.clauseById.get(p.id) ?? null,
         clauseLocked: p.locked ?? history.lockedById.get(p.id) ?? null,
+        stats: p.stats,
       },
       ctx,
     ),
@@ -200,6 +201,7 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
             ownerTeamId: row.ownerTeamId,
             clausePrice: row.clausePrice,
             clauseLocked: row.locked,
+            stats: statsFromOwnership(row),
           },
           ctx,
         ),
@@ -235,6 +237,7 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
             ownerTeamId: listing.fromComputer ? null : listing.sellerTeamId ?? null,
             clausePrice: null,
             clauseLocked: null,
+            stats: listing.stats,
           },
           ctx,
         );
@@ -294,10 +297,35 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
   };
 }
 
+type OwnershipRow = Awaited<ReturnType<typeof repo.getLatestOwnership>>[number];
+
+/**
+ * Rebuilds a scoring record from a stored snapshot. Only our own squad and
+ * today's market come back from the live API with `stats` attached; every other
+ * player in the league -- the clause targets -- is known only through the
+ * snapshot, and evaluating them on the role prior while our own squad had real
+ * numbers would have made every steal look like an upgrade.
+ *
+ * `fitness` cannot be reconstructed, so form is flat here and the projection
+ * rests on the season average alone. That is a weaker estimate, not a wrong
+ * one, and the sample size still shrinks it honestly.
+ */
+function statsFromOwnership(row: OwnershipRow): PlayerStats | undefined {
+  if (row.average === null || row.matchesPlayed === null) return undefined;
+  return {
+    average: row.average,
+    homeAverage: row.homeAverage ?? undefined,
+    awayAverage: row.awayAverage ?? undefined,
+    averageLastFive: row.averageLastFive ?? undefined,
+    matches: row.matchesPlayed,
+    fitness: [],
+  };
+}
+
 interface History {
   form: Map<string, repo.PlayerForm>;
   trends: Map<string, repo.ValueTrend>;
-  difficulty: Awaited<ReturnType<typeof repo.getFixtureDifficulty>>;
+  difficulty: repo.FixtureMap;
   unavailable: Map<string, string>;
   startProbabilities: Map<string, number>;
   ownership: Awaited<ReturnType<typeof repo.getLatestOwnership>>;
@@ -360,7 +388,7 @@ async function loadHistory(): Promise<History> {
     safe(() => repo.getValueTrends(), [] as repo.ValueTrend[], warnings, "value trends"),
     safe(
       () => repo.getFixtureDifficulty(),
-      new Map() as Awaited<ReturnType<typeof repo.getFixtureDifficulty>>,
+      new Map() as repo.FixtureMap,
       warnings,
       "fixture difficulty",
     ),
@@ -398,8 +426,17 @@ async function loadHistory(): Promise<History> {
     );
   }
   if (coverage.roundsWithPoints === 0) {
+    // Not a fallback to role averages any more: the scoring record on every
+    // roster payload carries the per-player evidence. What is missing is real
+    // minutes, which is the difference between "did not start" and "started
+    // and was substituted early" -- so the start estimate is the coarse part.
     warnings.push(
-      "No per-round player points stored yet, so form falls back to role averages. Run the round-points backfill.",
+      "No per-round minutes stored, so how often a player starts is estimated from rounds appeared in rather than measured.",
+    );
+  }
+  if (!coverage.hasOdds) {
+    warnings.push(
+      "No bookmaker odds stored yet, so opponent strength falls back to goal difference from results so far.",
     );
   }
   if (coverage.playersWithClause === 0) {

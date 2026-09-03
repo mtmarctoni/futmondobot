@@ -17,6 +17,7 @@ import type {
   MatchOdds,
   MoneyEvent,
   Player,
+  PlayerStats,
   PlayerSummary,
   RankedTeam,
   RosterPlayer,
@@ -76,6 +77,37 @@ export function num(v: unknown): number | undefined {
 export function avg(v: unknown): number | undefined {
   if (isRec(v)) return num(pick(v, "average", "avg", "averageLastFive"));
   return num(v);
+}
+
+/**
+ * The whole `average` object, not just its headline number. Everything the
+ * expected-points model knows about a player's form comes from here, because
+ * `/1/userteam/roundlineup` returns an empty player list for closed rounds and
+ * so `round_points` never fills.
+ *
+ * A zero in `fitness` means a round the player did not feature in: Futmondo
+ * awards points for the appearance itself, so a player who was on the pitch
+ * essentially never finishes on exactly zero. That reading is checked against
+ * `matches` by the caller rather than trusted blindly.
+ */
+export function parsePlayerStats(v: unknown): PlayerStats | undefined {
+  if (!isRec(v)) return undefined;
+  const average = num(pick(v, "average", "avg"));
+  if (average === undefined) return undefined;
+
+  const fitnessRaw = v.fitness;
+  const fitness = Array.isArray(fitnessRaw)
+    ? fitnessRaw.map((entry) => num(entry) ?? 0)
+    : [];
+
+  return {
+    average,
+    homeAverage: num(pick(v, "homeAverage", "home_average")),
+    awayAverage: num(pick(v, "awayAverage", "away_average")),
+    averageLastFive: num(pick(v, "averageLastFive", "average_last_five")),
+    matches: num(pick(v, "matches", "played", "appearances")) ?? 0,
+    fitness,
+  };
 }
 
 export function bool(v: unknown): boolean | undefined {
@@ -178,6 +210,7 @@ function basePlayer(raw: Rec): Player | null {
     value: num(pick(raw, "value", "marketValue", "totalValue")) ?? 0,
     points: num(pick(raw, "points", "totalPoints", "seasonPoints")) ?? 0,
     average: avg(pick(raw, "average", "avg", "pointsAverage")),
+    stats: parsePlayerStats(pick(raw, "average", "stats", "record")),
     slug: str(pick(raw, "slug", "player_slug")),
     photo: str(pick(raw, "photo", "image", "avatar")),
     raw,
@@ -343,20 +376,47 @@ export function parseRounds(answer: unknown): Round[] {
   return out;
 }
 
+/**
+ * `/2/league/matches` names the two sides `h` and `a`, not `home` and `away`.
+ * Reading only the long spellings left every one of the 380 stored fixtures
+ * with a null team id, which broke fixture difficulty completely: odds can only
+ * reach a player through their club id, so every opponent scored as neutral and
+ * facing Barcelona looked exactly like facing a relegation side.
+ */
 function parseMatch(raw: Rec): Match | null {
   const matchId = id(raw, "matchId");
   if (!matchId) return null;
   const info = isRec(raw.info) ? raw.info : {};
-  const home = isRec(raw.home) ? raw.home : isRec(raw.local) ? raw.local : {};
-  const away = isRec(raw.away) ? raw.away : isRec(raw.visitor) ? raw.visitor : {};
+  const home = isRec(raw.h)
+    ? raw.h
+    : isRec(raw.home)
+      ? raw.home
+      : isRec(raw.local)
+        ? raw.local
+        : {};
+  const away = isRec(raw.a)
+    ? raw.a
+    : isRec(raw.away)
+      ? raw.away
+      : isRec(raw.visitor)
+        ? raw.visitor
+        : {};
+
+  // `st` is a single-letter state; "F" is full time. Scores only mean something
+  // once it is, since an unplayed fixture reports 0-0 rather than null.
+  const state = str(pick(raw, "st", "status", "state"));
+  const finished = state === undefined ? undefined : state.toUpperCase() === "F";
 
   return {
     id: matchId,
     date: str(pick(info, "date", "kickoff")) ?? str(pick(raw, "date", "kickoff")),
     homeTeamId: id(home) ?? str(pick(raw, "homeTeamId", "localTeamId")),
     awayTeamId: id(away) ?? str(pick(raw, "awayTeamId", "visitorTeamId")),
-    homeTeamName: str(pick(home, "name", "shortName")),
-    awayTeamName: str(pick(away, "name", "shortName")),
+    homeTeamName: str(pick(home, "name", "shortName", "shortname")),
+    awayTeamName: str(pick(away, "name", "shortName", "shortname")),
+    homeScore: finished ? num(pick(home, "score", "goals")) : undefined,
+    awayScore: finished ? num(pick(away, "score", "goals")) : undefined,
+    finished,
     raw,
   };
 }
@@ -569,14 +629,71 @@ export function parseMoneyEvents(answer: unknown): MoneyEvent[] {
 
 // ------------------------------------------------------------------ odds -----
 
+/** Market names that mean the plain 1X2 result, lowercased. */
+const RESULT_MARKETS = new Set([
+  "match result",
+  "full time result",
+  "match odds",
+  "1x2",
+  "resultado",
+  "resultado del partido",
+]);
+
+/**
+ * `/5/match/odds` does not return a flat {home, draw, away}. It returns every
+ * market the bookmakers price -- correct score, total goals, half time/full
+ * time, dozens of them -- as `odds[]`, each with an `mn` market name and a
+ * `sels[]` of selections, and each selection carrying one quote per bookmaker.
+ *
+ * Reading it as a flat object found nothing, so not one of the 380 fixtures
+ * ever stored a price and fixture difficulty sat at the neutral 0.5 for every
+ * club in the league. What we want is the "Match Result" market, whose three
+ * selections are named "1", "X" and "2" -- in that order in the client, but not
+ * in the payload, so they are matched by name.
+ *
+ * Bookmakers disagree and some quotes go stale, so each selection takes the
+ * median across books rather than the first or the mean: one bookmaker left on
+ * an old price cannot then swing the fixture.
+ */
 export function parseOdds(matchId: string, answer: unknown): MatchOdds | null {
   if (!isRec(answer)) return null;
-  const rec = isRec(answer.odds) ? answer.odds : answer;
-  const home = num(pick(rec, "home", "local", "1", "homeWin"));
-  const draw = num(pick(rec, "draw", "tie", "x", "X"));
-  const away = num(pick(rec, "away", "visitor", "2", "awayWin"));
+
+  // Tolerate the flat shape too, in case some deployment really does send one.
+  const flat = isRec(answer.odds) ? answer.odds : answer;
+  const flatHome = num(pick(flat, "home", "local", "homeWin"));
+  const flatDraw = num(pick(flat, "draw", "tie"));
+  const flatAway = num(pick(flat, "away", "visitor", "awayWin"));
+  if (flatHome !== undefined || flatDraw !== undefined || flatAway !== undefined) {
+    return { matchId, home: flatHome, draw: flatDraw, away: flatAway, raw: answer };
+  }
+
+  const markets = asArray(answer, "odds", "markets");
+  const result = markets.find((m) => {
+    const name = str(pick(m, "mn", "marketName", "name"));
+    return name !== undefined && RESULT_MARKETS.has(name.trim().toLowerCase());
+  });
+  if (!result) return null;
+
+  const bySelection = new Map<string, number>();
+  for (const sel of asArray(result.sels, "sels", "selections")) {
+    const key = str(pick(sel, "ssn", "selectionName", "sn"))?.trim().toUpperCase();
+    if (!key) continue;
+    const quotes: number[] = [];
+    for (const quote of asArray(sel.odds, "odds", "prices")) {
+      // `c` is the current price, `f` the opening one. Prefer current.
+      const price = num(pick(quote, "c", "current", "price", "odds", "f"));
+      if (price !== undefined && price > 1) quotes.push(price);
+    }
+    if (quotes.length === 0) continue;
+    quotes.sort((a, b) => a - b);
+    bySelection.set(key, quotes[Math.floor(quotes.length / 2)]);
+  }
+
+  const home = bySelection.get("1");
+  const draw = bySelection.get("X");
+  const away = bySelection.get("2");
   if (home === undefined && draw === undefined && away === undefined) return null;
-  return { matchId, home, draw, away, raw: answer };
+  return { matchId, home, draw, away, raw: { matchId } };
 }
 
 // --------------------------------------------------------------- config ------

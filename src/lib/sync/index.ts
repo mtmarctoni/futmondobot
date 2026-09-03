@@ -261,6 +261,7 @@ export async function backfillRoundPoints(
     LIMIT ${options.maxRounds ?? 5}`) as Record<string, unknown>[];
 
   let rowsWritten = 0;
+  let emptyLineups = 0;
   for (const row of pending) {
     const roundId = String(row.round_id);
     for (const teamId of teamIds) {
@@ -270,6 +271,7 @@ export async function backfillRoundPoints(
           teamId,
           roundId,
         );
+        if (lineup.players.length === 0) emptyLineups += 1;
         rowsWritten += await repo.upsertRoundPoints(lineup);
       } catch (err) {
         warnings.push(`roundlineup ${roundId}/${teamId}: ${reason(err)}`);
@@ -279,6 +281,19 @@ export async function backfillRoundPoints(
 
   wrote.roundsProcessed = pending.length;
   wrote.playerRounds = rowsWritten;
+  wrote.emptyLineups = emptyLineups;
+
+  // The endpoint answers, reports the right formation, and returns no players
+  // at all -- so it looks like a working call that found nothing rather than a
+  // failure. Said out loud, because the alternative is spending nine requests
+  // per round forever and quietly concluding the squad never played.
+  if (emptyLineups > 0 && rowsWritten === 0) {
+    warnings.push(
+      `/1/userteam/roundlineup returned no players for all ${emptyLineups} team-rounds requested. ` +
+        "Per-round minutes cannot be collected this way; form is coming from the scoring " +
+        "record on the roster payload instead. See docs/futmondo-api.md.",
+    );
+  }
 
   return { job: "roundPoints", wrote, warnings, durationMs: Date.now() - started };
 }

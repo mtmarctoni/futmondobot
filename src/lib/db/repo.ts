@@ -8,6 +8,7 @@ import type {
   MatchOdds,
   MoneyEvent,
   Player,
+  PlayerStats,
   RosterPlayer,
   RoundLineup,
   RoundWithMatches,
@@ -177,6 +178,12 @@ export interface SnapshotInput {
   ownerTeamId?: string;
   locked?: boolean;
   marketPrice?: number;
+  /** Matches played: the sample size behind `average`. */
+  matchesPlayed?: number;
+  /** Per-round mean over the last five, a missed round counting as zero. */
+  averageLastFive?: number;
+  homeAverage?: number;
+  awayAverage?: number;
 }
 
 /**
@@ -212,6 +219,10 @@ export function mergeSnapshots(rows: SnapshotInput[]): SnapshotInput[] {
       ownerTeamId: row.ownerTeamId ?? prev.ownerTeamId,
       locked: row.locked ?? prev.locked,
       marketPrice: row.marketPrice ?? prev.marketPrice,
+      matchesPlayed: row.matchesPlayed ?? prev.matchesPlayed,
+      averageLastFive: row.averageLastFive ?? prev.averageLastFive,
+      homeAverage: row.homeAverage ?? prev.homeAverage,
+      awayAverage: row.awayAverage ?? prev.awayAverage,
     });
   }
   return [...merged.values()];
@@ -227,11 +238,13 @@ export async function writeSnapshots(
   await sql.query(
     `INSERT INTO player_snapshots (
        snapshot_date, player_id, value, points, average,
-       clause_price, owner_team_id, locked, market_price, captured_at
+       clause_price, owner_team_id, locked, market_price,
+       matches_played, average_last_five, home_average, away_average, captured_at
      )
      SELECT $1::date, * FROM UNNEST(
        $2::text[], $3::bigint[], $4::numeric[], $5::numeric[],
-       $6::bigint[], $7::text[], $8::boolean[], $9::bigint[]
+       $6::bigint[], $7::text[], $8::boolean[], $9::bigint[],
+       $10::int[], $11::numeric[], $12::numeric[], $13::numeric[]
      ), now()
      ON CONFLICT (snapshot_date, player_id) DO UPDATE SET
        value         = COALESCE(EXCLUDED.value, player_snapshots.value),
@@ -241,6 +254,10 @@ export async function writeSnapshots(
        owner_team_id = COALESCE(EXCLUDED.owner_team_id, player_snapshots.owner_team_id),
        locked        = COALESCE(EXCLUDED.locked, player_snapshots.locked),
        market_price  = COALESCE(EXCLUDED.market_price, player_snapshots.market_price),
+       matches_played    = COALESCE(EXCLUDED.matches_played, player_snapshots.matches_played),
+       average_last_five = COALESCE(EXCLUDED.average_last_five, player_snapshots.average_last_five),
+       home_average      = COALESCE(EXCLUDED.home_average, player_snapshots.home_average),
+       away_average      = COALESCE(EXCLUDED.away_average, player_snapshots.away_average),
        captured_at   = now()`,
     [
       date,
@@ -252,9 +269,27 @@ export async function writeSnapshots(
       rows.map((r) => r.ownerTeamId ?? null),
       rows.map((r) => r.locked ?? null),
       rows.map((r) => r.marketPrice ?? null),
+      rows.map((r) => r.matchesPlayed ?? null),
+      rows.map((r) => r.averageLastFive ?? null),
+      rows.map((r) => r.homeAverage ?? null),
+      rows.map((r) => r.awayAverage ?? null),
     ],
   );
   return rows.length;
+}
+
+/**
+ * The scoring record, flattened onto a snapshot row. Historised because the API
+ * only ever reports the present: a day not captured is a day of form lost.
+ */
+function statFields(stats: PlayerStats | undefined): Partial<SnapshotInput> {
+  if (!stats) return {};
+  return {
+    matchesPlayed: stats.matches,
+    averageLastFive: stats.averageLastFive,
+    homeAverage: stats.homeAverage,
+    awayAverage: stats.awayAverage,
+  };
 }
 
 export function snapshotsFromRoster(
@@ -269,6 +304,7 @@ export function snapshotsFromRoster(
     clausePrice: p.clause,
     ownerTeamId,
     locked: p.locked,
+    ...statFields(p.stats),
   }));
 }
 
@@ -279,6 +315,7 @@ export function snapshotsFromMarket(market: MarketPlayer[]): SnapshotInput[] {
     points: p.points,
     average: p.average,
     marketPrice: p.price,
+    ...statFields(p.stats),
     // A machine listing means nobody owns them; leave owner unset otherwise so
     // COALESCE does not clobber ownership learned from a roster sync.
     ownerTeamId: p.fromComputer ? undefined : p.sellerTeamId,
@@ -373,13 +410,20 @@ export async function getLatestOwnership(): Promise<
     clausePrice: number | null;
     ownerTeamId: string | null;
     locked: boolean | null;
+    average: number | null;
+    matchesPlayed: number | null;
+    averageLastFive: number | null;
+    homeAverage: number | null;
+    awayAverage: number | null;
   }[]
 > {
   const sql = getSql();
   const rows = (await sql`
     SELECT DISTINCT ON (s.player_id)
       s.player_id, p.name, p.role, p.team_id, p.team_name, p.slug,
-      s.value, s.points, s.clause_price, s.owner_team_id, s.locked
+      s.value, s.points, s.clause_price, s.owner_team_id, s.locked,
+      s.average, s.matches_played, s.average_last_five,
+      s.home_average, s.away_average
     FROM player_snapshots s
     JOIN players p ON p.player_id = s.player_id
     ORDER BY s.player_id, s.snapshot_date DESC`) as Row[];
@@ -396,6 +440,12 @@ export async function getLatestOwnership(): Promise<
     clausePrice: r.clause_price === null ? null : Number(r.clause_price),
     ownerTeamId: r.owner_team_id as string | null,
     locked: r.locked as boolean | null,
+    average: r.average === null ? null : Number(r.average),
+    matchesPlayed: r.matches_played === null ? null : Number(r.matches_played),
+    averageLastFive:
+      r.average_last_five === null ? null : Number(r.average_last_five),
+    homeAverage: r.home_average === null ? null : Number(r.home_average),
+    awayAverage: r.away_average === null ? null : Number(r.away_average),
   }));
 }
 
@@ -438,11 +488,11 @@ export async function upsertRounds(rounds: RoundWithMatches[]): Promise<number> 
     await sql.query(
       `INSERT INTO matches (
          match_id, round_id, kickoff, home_team_id, away_team_id,
-         home_team, away_team, updated_at
+         home_team, away_team, home_score, away_score, finished, updated_at
        )
        SELECT * FROM UNNEST(
          $1::text[], $2::text[], $3::timestamptz[], $4::text[], $5::text[],
-         $6::text[], $7::text[]
+         $6::text[], $7::text[], $8::int[], $9::int[], $10::boolean[]
        ), now()
        ON CONFLICT (match_id) DO UPDATE SET
          round_id     = EXCLUDED.round_id,
@@ -451,6 +501,9 @@ export async function upsertRounds(rounds: RoundWithMatches[]): Promise<number> 
          away_team_id = COALESCE(EXCLUDED.away_team_id, matches.away_team_id),
          home_team    = COALESCE(EXCLUDED.home_team, matches.home_team),
          away_team    = COALESCE(EXCLUDED.away_team, matches.away_team),
+         home_score   = COALESCE(EXCLUDED.home_score, matches.home_score),
+         away_score   = COALESCE(EXCLUDED.away_score, matches.away_score),
+         finished     = COALESCE(EXCLUDED.finished, matches.finished),
          updated_at   = now()`,
       [
         matches.map((m) => m.id),
@@ -460,6 +513,9 @@ export async function upsertRounds(rounds: RoundWithMatches[]): Promise<number> 
         matches.map((m) => m.awayTeamId ?? null),
         matches.map((m) => m.homeTeamName ?? null),
         matches.map((m) => m.awayTeamName ?? null),
+        matches.map((m) => m.homeScore ?? null),
+        matches.map((m) => m.awayScore ?? null),
+        matches.map((m) => m.finished ?? null),
       ],
     );
   }
@@ -526,56 +582,113 @@ function toRoundRow(r: Row): RoundRow {
   };
 }
 
+export interface FixtureOutlook {
+  /** 0..1, higher is harder. */
+  difficulty: number;
+  kickoff: string | null;
+  opponent: string | null;
+  /** True when the club plays at home. */
+  home: boolean;
+  /** Where the number came from, so the report can say. */
+  basis: "odds" | "form" | "unknown";
+}
+
+export type FixtureMap = Map<string, FixtureOutlook>;
+
 /**
  * Difficulty per real club for its next fixture, on a 0..1 scale where higher
- * is harder, derived from bookmaker odds. Implied win probability is
- * 1/odds; normalising against the two other outcomes removes the bookmaker
- * margin, and difficulty is then the complement of the win chance.
+ * is harder.
+ *
+ * Bookmaker odds are the primary signal: implied win probability is 1/odds, and
+ * normalising against the two other outcomes removes the bookmaker margin, so
+ * difficulty is the complement of the win chance.
+ *
+ * Odds are only priced a few days out, and a fixture nobody has priced used to
+ * fall back to a flat 0.5 -- which made facing Barcelona indistinguishable from
+ * facing the bottom club. So goal difference per match from results already
+ * played stands in, shrunk towards neutral by how few matches back it, and the
+ * report says which of the two it used.
  */
-export async function getFixtureDifficulty(): Promise<
-  Map<string, { difficulty: number; kickoff: string | null; opponent: string | null }>
-> {
+export async function getFixtureDifficulty(): Promise<FixtureMap> {
   const sql = getSql();
   const rows = (await sql`
-    WITH next_match AS (
-      SELECT DISTINCT ON (team_id) team_id, match_id, kickoff, win_odds, draw_odds, lose_odds, opponent
+    WITH strength AS (
+      SELECT team_id, avg(gd)::numeric AS gd, count(*) AS played
+      FROM (
+        SELECT home_team_id AS team_id, (home_score - away_score) AS gd
+        FROM matches
+        WHERE finished AND home_score IS NOT NULL AND away_score IS NOT NULL
+          AND home_team_id IS NOT NULL
+        UNION ALL
+        SELECT away_team_id AS team_id, (away_score - home_score) AS gd
+        FROM matches
+        WHERE finished AND home_score IS NOT NULL AND away_score IS NOT NULL
+          AND away_team_id IS NOT NULL
+      ) played_sides
+      GROUP BY team_id
+    ),
+    next_match AS (
+      SELECT DISTINCT ON (team_id)
+        team_id, match_id, kickoff, win_odds, draw_odds, lose_odds,
+        opponent, opponent_id, home
       FROM (
         SELECT home_team_id AS team_id, match_id, kickoff,
                odds_home AS win_odds, odds_draw AS draw_odds, odds_away AS lose_odds,
-               away_team AS opponent
+               away_team AS opponent, away_team_id AS opponent_id, TRUE AS home
         FROM matches WHERE home_team_id IS NOT NULL
         UNION ALL
         SELECT away_team_id AS team_id, match_id, kickoff,
                odds_away AS win_odds, odds_draw AS draw_odds, odds_home AS lose_odds,
-               home_team AS opponent
+               home_team AS opponent, home_team_id AS opponent_id, FALSE AS home
         FROM matches WHERE away_team_id IS NOT NULL
       ) sides
       WHERE kickoff IS NOT NULL AND kickoff > now()
       ORDER BY team_id, kickoff
     )
-    SELECT team_id, kickoff, opponent, win_odds, draw_odds, lose_odds FROM next_match`) as Row[];
+    SELECT n.team_id, n.kickoff, n.opponent, n.home,
+           n.win_odds, n.draw_odds, n.lose_odds,
+           s.gd AS opponent_gd, s.played AS opponent_played
+    FROM next_match n
+    LEFT JOIN strength s ON s.team_id = n.opponent_id`) as Row[];
 
-  const out = new Map<
-    string,
-    { difficulty: number; kickoff: string | null; opponent: string | null }
-  >();
+  const out: FixtureMap = new Map();
 
   for (const r of rows) {
     const win = num(r.win_odds);
     const draw = num(r.draw_odds);
     const lose = num(r.lose_odds);
-    let difficulty = 0.5; // Neutral until odds are known.
+    const home = Boolean(r.home);
+
+    let difficulty = 0.5;
+    let basis: FixtureOutlook["basis"] = "unknown";
 
     if (win && draw && lose && win > 1 && draw > 1 && lose > 1) {
       const total = 1 / win + 1 / draw + 1 / lose;
-      const winProb = 1 / win / total;
-      difficulty = clamp01(1 - winProb);
+      difficulty = clamp01(1 - 1 / win / total);
+      basis = "odds";
+    } else {
+      const gd = num(r.opponent_gd);
+      const played = num(r.opponent_played) ?? 0;
+      if (gd !== null && played > 0) {
+        // A goal difference of +3 per match is about as dominant as a league
+        // gets, so that is the far end of the scale rather than a hard cap.
+        const raw = clamp01(0.5 + gd / 6);
+        // Three matches of evidence still only counts for half its face value.
+        const weight = played / (played + 3);
+        // Home advantage is worth a few points of win probability.
+        difficulty = clamp01(
+          0.5 + weight * (raw - 0.5) + (home ? -0.04 : 0.04),
+        );
+        basis = "form";
+      }
     }
 
     out.set(String(r.team_id), {
       difficulty,
       kickoff: isoInstant(r.kickoff),
       opponent: r.opponent as string | null,
+      home,
+      basis,
     });
   }
   return out;

@@ -75,6 +75,17 @@ These are load-bearing. Breaking one produces a bug that is expensive and quiet.
 
 ## Traps that look fine
 
+- **A parser that reads the wrong key never fails; it returns a neutral default
+  and the report still looks plausible.** Every real bug found so far is this
+  one bug: `role()` missing `CENTROCAMPISTA` deleted every midfielder in the
+  league; `parseMatch` reading `home`/`away` instead of `h`/`a` left all 380
+  fixtures without a team id, so opponent strength could not attach to a player
+  and facing Barcelona scored the same as facing the bottom club; `parseOdds`
+  expecting a flat result priced zero fixtures. The unit suite was green
+  throughout all three, because the fixtures were written from the same wrong
+  assumption as the code. **A parser test is worth nothing unless its fixture is
+  a real captured payload.**
+
 - `/5/league/championshipplayers` looks like a full player dump. It carries
   **no ownership and no clause price** — only `{id, name, teamId, role}`. Clause
   price comes from `/1/player/summary`, one call per player; ownership from
@@ -99,6 +110,15 @@ These are load-bearing. Breaking one produces a bug that is expensive and quiet.
   round trip. Follow the existing pattern rather than looping statements.
 - Expected points are real points, not a normalised index, so numbers stay
   interpretable and convert to prize money at the league's own rate.
+- **Form comes from the `average` object on the roster payload, not from
+  `round_points`.** `/1/userteam/roundlineup` returns an empty player list even
+  for a closed round, so that table never fills; see `docs/futmondo-api.md`.
+  Waiting for it meant every player scored the bare role prior and the lineup
+  page showed one identical number per position.
+- **This league has no bench** (`bench.enabled: false`), and `planMoves` can only
+  promote a substitute, so the automatic lineup writer cannot move anything here.
+  The recommendation is the deliverable: the daily message prints the XI in full,
+  in pitch order, so it can be entered without opening the report.
 - No emojis in code, comments, commit messages or UI copy.
 
 ## Verify before claiming done

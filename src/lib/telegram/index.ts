@@ -173,6 +173,8 @@ export function formatReport(report: AnalysisReport): string {
     }
   }
 
+  lines.push(formatXI(report));
+
   // State what was automated, so nothing happens silently.
   const done = report.today.actions.filter(
     (a) => a.kind === "info" && a.detail.includes("Applied automatically"),
@@ -183,6 +185,67 @@ export function formatReport(report: AnalysisReport): string {
 
   if (report.warnings.length > 0) {
     lines.push(`\n<i>${escapeHtml(report.warnings.slice(0, 3).join(" · "))}</i>`);
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * The XI to field, in full, every day.
+ *
+ * This is the point of the whole app for a league like this one: bench is
+ * disabled, so the automatic lineup writer can only ever swap a starter for a
+ * substitute and there are no substitutes to swap in. Nothing can be applied
+ * for you, which makes the recommendation itself the deliverable -- and reading
+ * it off a phone has to be enough to set the lineup without opening the report.
+ *
+ * Ordered keeper first then back to front, the way the Futmondo pitch is laid
+ * out, so it can be entered top to bottom without re-sorting.
+ */
+export function formatXI(report: AnalysisReport): string {
+  const { lineup } = report;
+  if (lineup.starters.length === 0) return "";
+
+  const lines: string[] = [
+    `\n<b>Field this XI</b> (${escapeHtml(lineup.formation.label)}, ${lineup.expectedPoints.toFixed(1)} pts)`,
+  ];
+
+  if (
+    report.currentFormation &&
+    report.currentFormation !== lineup.formation.label
+  ) {
+    // Formation writes are not automated: the payload could not be verified,
+    // and guessing it could corrupt a lineup. So it is asked for explicitly.
+    lines.push(
+      `<i>Change formation from ${escapeHtml(report.currentFormation)} to ${escapeHtml(lineup.formation.label)} first.</i>`,
+    );
+  }
+
+  for (const p of lineup.starters) {
+    const opponent = p.nextOpponent
+      ? ` — ${p.fixtureDifficulty > 0.65 ? "hard" : p.fixtureDifficulty < 0.45 ? "easy" : "even"} ${escapeHtml(p.nextOpponent)}`
+      : "";
+    lines.push(
+      `${p.role}  <b>${escapeHtml(p.name)}</b>  ${p.expectedPoints.toFixed(1)}${opponent}`,
+    );
+  }
+
+  // Anyone left out for a reason the user should know about, rather than
+  // silently: an injury doubt they may be able to check themselves.
+  const doubtful = lineup.excluded.filter((p) => p.unavailableReason);
+  if (doubtful.length > 0) {
+    lines.push(
+      `<i>Left out: ${doubtful
+        .map((p) => `${escapeHtml(p.name)} (${escapeHtml(p.unavailableReason ?? "")})`)
+        .join(", ")}</i>`,
+    );
+  }
+
+  if (lineup.incomplete) {
+    const missing = Object.entries(lineup.shortfall)
+      .map(([role, count]) => `${count} ${role}`)
+      .join(", ");
+    lines.push(`<i>Short of ${escapeHtml(missing)} — this XI is not complete.</i>`);
   }
 
   return lines.join("\n");
