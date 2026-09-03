@@ -81,10 +81,21 @@ These are load-bearing. Breaking one produces a bug that is expensive and quiet.
   league; `parseMatch` reading `home`/`away` instead of `h`/`a` left all 380
   fixtures without a team id, so opponent strength could not attach to a player
   and facing Barcelona scored the same as facing the bottom club; `parseOdds`
-  expecting a flat result priced zero fixtures. The unit suite was green
-  throughout all three, because the fixtures were written from the same wrong
-  assumption as the code. **A parser test is worth nothing unless its fixture is
-  a real captured payload.**
+  expecting a flat result priced zero fixtures; `parseRoster` reading `clause`
+  and `market` as flat values when both are objects, so no roster row ever
+  reported a clause price or a listing. The unit suite was green throughout all
+  four, because the fixtures were written from the same wrong assumption as the
+  code. **A parser test is worth nothing unless its fixture is a real captured
+  payload.**
+
+- **A player transferred out of the league stays in Futmondo, looking normal.**
+  He keeps a squad slot, a value, a clause price, and can still be fielded; he
+  simply scores nothing, for ever. No field flags it — `status` is `""` either
+  way, and `average.fitness` is populated for at least one departed player. The
+  only signal is the calendar: a club is in the competition if and only if
+  `/2/league/matches` gives it fixtures. `src/lib/engine/departed.ts` owns this,
+  and it refuses to fire on a partial calendar rather than advising a sale it
+  cannot justify. It was found only because the user recognised a name.
 
 - `/5/league/championshipplayers` looks like a full player dump. It carries
   **no ownership and no clause price** — only `{id, name, teamId, role}`. Clause
@@ -124,7 +135,7 @@ These are load-bearing. Breaking one produces a bug that is expensive and quiet.
 ## Verify before claiming done
 
 ```bash
-pnpm typecheck && pnpm lint && pnpm test    # 132 unit tests, no network
+pnpm typecheck && pnpm lint && pnpm test    # 185 unit tests, no network
 pnpm build
 pnpm db:smoke                               # 29 checks against the real database
 ```
@@ -146,6 +157,7 @@ src/lib/futmondo/   transport, total parsers, typed client. Read docs/futmondo-a
 src/lib/db/         schema, migrations, repository, session store
 src/lib/sync/       the jobs that accumulate history the API forgets
 src/lib/engine/     expected points -> lineup, market, clauses -> today's actions
+src/lib/engine/departed.ts  players who have left the competition, from the calendar
 src/lib/engine/apply.ts   the only place that writes to Futmondo automatically
 src/lib/providers/  probable-lineup scrape and name matching
 src/lib/telegram/   message formatting and button callbacks

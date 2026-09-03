@@ -294,6 +294,17 @@ async function main() {
     `difficulty=${otherDifficulty?.difficulty.toFixed(3)}`,
   );
 
+  // The competition's membership, which is what the departed-player check
+  // measures a player's club against. Both sides of a fixture must appear, or
+  // half the league would read as having left.
+  const clubs = await repo.getCompetitionClubs();
+  check(
+    "getCompetitionClubs returns both sides of a fixture, with names",
+    clubs.get(PREFIX + "club") === "Smoke FC" &&
+      clubs.get(PREFIX + "other") === "Other FC",
+    `${clubs.size} clubs, ours=${clubs.get(PREFIX + "club")} theirs=${clubs.get(PREFIX + "other")}`,
+  );
+
   // ----------------------------------------------------- round points ------
   const lineup = {
     roundId: PREFIX + "r1",

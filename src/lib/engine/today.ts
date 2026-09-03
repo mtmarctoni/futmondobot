@@ -7,6 +7,7 @@
  * wait. Anything that needs no action is deliberately not listed.
  */
 import type { ClauseReport, ExposedPlayer, StealCandidate } from "./clauses";
+import type { DepartedPlayer } from "./departed";
 import type { LineupChange, LineupPick } from "./lineup";
 import type { MarketReport } from "./market";
 import { fmtMoney, type LeagueRules } from "./types";
@@ -53,6 +54,8 @@ export interface TodayInput {
   lineupApplied: boolean;
   market: MarketReport;
   clauses: ClauseReport;
+  /** Our players who have left the competition. */
+  departed: DepartedPlayer[];
   deadline: string | null;
   rules: LeagueRules;
   now?: Date;
@@ -67,9 +70,17 @@ export function buildToday(input: TodayInput): TodayReport {
   const actions: Action[] = [];
 
   actions.push(...lineupActions(input, hoursToDeadline));
+  actions.push(...departureActions(input.departed));
   actions.push(...lockActions(input.clauses.toLock));
   actions.push(...stealActions(input.clauses.steals, input.rules));
-  actions.push(...marketActions(input.market));
+  // Departures already have their own action, and a duplicate sell for the
+  // same player reads as two separate problems.
+  actions.push(
+    ...marketActions(
+      input.market,
+      new Set(input.departed.map((p) => p.playerId)),
+    ),
+  );
 
   actions.sort((a, b) => b.weight - a.weight);
 
@@ -165,6 +176,54 @@ function lineupActions(
 }
 
 /**
+ * A player who has left the competition.
+ *
+ * This ranks just under a broken XI and just over a clause block, because it
+ * is the only problem on this list that gets worse every day it is ignored:
+ * the player cannot score, and his value drifts down while the rest of the
+ * league's does not. It is never automated -- listing a player moves real
+ * money and stays a two-tap decision.
+ */
+function departureActions(departed: DepartedPlayer[]): Action[] {
+  return departed.slice(0, 3).map((player, index) => {
+    const at = player.clubName ? ` He is at ${player.clubName} now.` : "";
+    const weight = 89 - index;
+
+    if (player.onMarket) {
+      const asking =
+        player.askPrice !== null ? ` at ${fmtMoney(player.askPrice)}` : "";
+      return {
+        id: `departed-${player.playerId}`,
+        // Already listed, so there is nothing left to do but wait: an action
+        // button here would only offer to list him twice.
+        kind: "info" as const,
+        weight,
+        urgency: "whenever" as const,
+        title: `${player.name} has left the competition`,
+        detail: `Already on the market${asking}.${at} He cannot score again, so take the best offer rather than holding out for full value.`,
+        pointsAtStake: 0,
+        money: player.askPrice ?? player.value,
+        playerId: player.playerId,
+        playerName: player.name,
+      };
+    }
+
+    return {
+      id: `departed-${player.playerId}`,
+      kind: "sell" as const,
+      weight,
+      urgency: "today" as const,
+      title: `Sell ${player.name} — he has left the competition`,
+      detail: `${player.name} is no longer in this league, so he will score nothing for as long as you hold him.${at} ${fmtMoney(player.value)} and a squad slot are doing nothing. Put him on the market.`,
+      pointsAtStake: 0,
+      money: player.value,
+      playerId: player.playerId,
+      playerName: player.name,
+    };
+  });
+}
+
+/**
  * Blocking is free and irreversible only in the sense that it can be undone at
  * will, so anything genuinely exposed is worth doing immediately.
  */
@@ -207,7 +266,10 @@ function stealActions(steals: StealCandidate[], rules: LeagueRules): Action[] {
     });
 }
 
-function marketActions(market: MarketReport): Action[] {
+function marketActions(
+  market: MarketReport,
+  skipPlayerIds: ReadonlySet<string>,
+): Action[] {
   const actions: Action[] = [];
 
   const topBuy = market.buys.find((b) => b.affordable);
@@ -227,7 +289,10 @@ function marketActions(market: MarketReport): Action[] {
   }
 
   // Selling matters most when it is free and unlocks something better.
-  for (const [index, sell] of market.sells.filter((s) => s.cost === 0).slice(0, 2).entries()) {
+  const worthSelling = market.sells.filter(
+    (s) => s.cost === 0 && !skipPlayerIds.has(s.player.playerId),
+  );
+  for (const [index, sell] of worthSelling.slice(0, 2).entries()) {
     actions.push({
       id: `sell-${sell.player.playerId}`,
       kind: "sell",

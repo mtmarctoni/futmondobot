@@ -6,6 +6,7 @@ import type { Action } from "@/lib/engine/today";
 import {
   Card,
   CoverageNote,
+  DepartedBanner,
   Empty,
   ErrorBox,
   Loading,
@@ -74,6 +75,8 @@ export function DashboardClient({ initial }: { initial: AnalysisReport }) {
           highlight={data.today.pointsAvailable >= 1}
         />
       </div>
+
+      <DepartedBanner departed={data.departed} />
 
       <CoverageNote coverage={data.coverage} />
 

@@ -156,6 +156,9 @@ export function formatReport(report: AnalysisReport): string {
     `Funds ${fmtMoney(report.funds)} · squad ${fmtMoney(report.teamValue)} · max offer ${fmtMoney(report.market.maxOffer)}`,
   );
 
+  const departures = formatDepartures(report);
+  if (departures) lines.push(departures);
+
   const actionable = report.today.actions.filter((a) => a.kind !== "info");
   if (actionable.length === 0) {
     lines.push("\nNothing needs doing.");
@@ -187,6 +190,32 @@ export function formatReport(report: AnalysisReport): string {
     lines.push(`\n<i>${escapeHtml(report.warnings.slice(0, 3).join(" · "))}</i>`);
   }
 
+  return lines.join("\n");
+}
+
+/**
+ * Players who are no longer in the competition.
+ *
+ * Given its own block above everything else rather than left to the action
+ * list, because it is the one thing here that is invisible in Futmondo itself:
+ * the player's card looks normal, so nothing prompts you to check, and the
+ * cost accrues quietly for as long as nobody notices.
+ */
+export function formatDepartures(report: AnalysisReport): string {
+  if (report.departed.length === 0) return "";
+
+  const lines: string[] = [""];
+  for (const player of report.departed) {
+    const at = player.clubName ? ` (now at ${escapeHtml(player.clubName)})` : "";
+    lines.push(
+      `!! <b>${escapeHtml(player.name)}</b> has left the competition${at} — ${fmtMoney(player.value)} that cannot score.`,
+    );
+    lines.push(
+      player.onMarket
+        ? `   Already on the market${player.askPrice !== null ? ` at ${fmtMoney(player.askPrice)}` : ""}. Take the best offer.`
+        : `   List him on the market — there is a button for it below.`,
+    );
+  }
   return lines.join("\n");
 }
 
@@ -231,8 +260,13 @@ export function formatXI(report: AnalysisReport): string {
   }
 
   // Anyone left out for a reason the user should know about, rather than
-  // silently: an injury doubt they may be able to check themselves.
-  const doubtful = lineup.excluded.filter((p) => p.unavailableReason);
+  // silently: an injury doubt they may be able to check themselves. Players
+  // who have left the competition are skipped here because they already have
+  // their own block, and their reason reads as a parenthetical inside one.
+  const departedIds = new Set(report.departed.map((p) => p.playerId));
+  const doubtful = lineup.excluded.filter(
+    (p) => p.unavailableReason && !departedIds.has(p.playerId),
+  );
   if (doubtful.length > 0) {
     lines.push(
       `<i>Left out: ${doubtful

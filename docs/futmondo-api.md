@@ -128,7 +128,7 @@ but market endpoints take `player_id` and `player_slug` in snake_case.
 | Endpoint | Query | Returns |
 |---|---|---|
 | `/1/userteam/information` | `{championshipId, userteamId, type}` | **Funds, team value, max bid.** Source of truth for money |
-| `/1/userteam/roster` | `{championshipId, userteamId}` | `answer[]` of `{id, name, role, team, value, buyPrice}` |
+| `/1/userteam/roster` | `{championshipId, userteamId}` | `answer[]` of `{id, name, role, team, teamId, value, buyPrice, average{}, clause{}, market}` — see the row shape below |
 | `/1/userteam/lineup` | `{championshipId, userteamId}` | Current XI, bench and strategy string (e.g. `"4-3-3"`) |
 | `/1/userteam/rounds` | `{championshipId, userteamId}` | `answer[]` of `{id, number, status}`, status ∈ `closed`/`running`/`open` |
 | `/1/userteam/roundlineup` | `{championshipId, round: <roundId>, userteamId}` | Documented as per-player per-round `points` plus `detailedPoints.data`. **In this league it returns `players: []` for every closed round** — see the trap below |
@@ -137,6 +137,35 @@ but market endpoints take `player_id` and `player_slug` in snake_case.
 | `/1/userteam/nightmareteam` | `{championshipId, round}` | Worst XI |
 
 Roles are `POR`, `DEF`, `MED`, `DEL`.
+
+A real roster row, captured:
+
+```json
+{
+  "id": "63a8cd87bfb65a271f11db10", "name": "Carlos Álvarez", "slug": "67291985",
+  "role": "centrocampista", "points": 1.8, "value": 18526493,
+  "team": "América", "teamId": "5200250711398189070000b4",
+  "market": { "inMarket": true, "price": 18931044, "bids": [{ "id": "…", "price": 18204532 }] },
+  "average": { "average": 0, "homeAverage": 0, "awayAverage": 0,
+               "averageLastFive": 0, "matches": 0, "fitness": [] },
+  "clause": { "price": 38228076, "date": "2026-09-07T18:05:10.934Z",
+              "transferred": false, "suggestedClause": 24683383 }
+}
+```
+
+Two of those are nested where a flat value would be expected, and reading them
+as flat values fails silently:
+
+- **`clause` is an object**, not a number. `clause.price` is the same figure
+  `/1/player/summary` returns, so the roster already carries the clause price
+  for your own squad and needs no per-player fan-out for it.
+- **`market` is `false` when the player is not listed** and an object
+  `{inMarket, price, bids[]}` when they are. Its presence is the shape test.
+- **`team` and `teamId` are the real club**, and Futmondo keeps them current
+  through a real-world transfer *out* of the league. The row above is a player
+  who moved to Club América: still on the championship roster, still valued at
+  18.5M, still clause-priced, and permanently unable to score. Nothing in the
+  payload flags it — see "a departed player looks completely normal" below.
 
 ### Writing a lineup
 
@@ -174,7 +203,7 @@ Related: `/2/userteam/changestrategy`, `/2/userteam/changeplayer`,
 
 | Endpoint | Query | Notes |
 |---|---|---|
-| `/1/player/summary` | `{championshipId, playerId, userteamId}` | `answer.data.slug` and **`answer.championship.clause.price`** — the real clause price |
+| `/1/player/summary` | `{championshipId, playerId, userteamId}` | `answer.data.slug`, **`answer.championship.clause.price`**, plus `answer.points[]`, `answer.prices[]`, `answer.owners[]` and `answer.match` |
 | `/1/market/rosterclause` | `{championshipId, player_id, player_slug, price, userteamId}` | Pay a clause and take the player |
 | `/1/market/renewclause` | `{championshipId, player_id, userteamId}` | Raise your own player's clause |
 | `/1/userteam/lockplayer` | `{championshipId, playerId}` | **Block a clause on your own player** |
@@ -182,8 +211,26 @@ Related: `/2/userteam/changestrategy`, `/2/userteam/changeplayer`,
 | `/5/market/recalculateclauses` | `{championshipId}` | Admin |
 | `/5/market/recoverclause` | `{championshipId, userteamId}` | Admin |
 
-Clause price is not in the roster payload. To find steal targets you must
-fan out `/1/player/summary` per player — throttle it.
+Clause price for a *rival's* player is not in any bulk payload, so finding
+steal targets means fanning out `/1/player/summary` per player — throttle it.
+Your own squad's clause prices come free on the roster row (`clause.price`).
+
+`/1/player/summary` carries considerably more than the clause, and this is not
+yet all used:
+
+- **`answer.points[]` is the per-round record `/1/userteam/roundlineup` refuses
+  to give**: `{round, points, isHomeTeam, minutesPlayed, initialLineUp, st}`
+  where `st` is `"st"` for a start and `"bc"` for a bench appearance. This is a
+  measured start rate rather than the "rounds appeared in" estimate the model
+  currently uses. `minutesPlayed` appears to be a flag rather than a count in
+  this league — verify before trusting it as minutes.
+- **`answer.prices[]` is the value history**, per day, from before our first
+  snapshot: `{date, price, c, s}`.
+- **`answer.owners[]` is the ownership chain** with the price and date of each
+  transfer, `"futmondo"` naming the machine.
+- **`answer.championship.clause.date`** is in the future for a recently bought
+  player, alongside `unlockDate` — a grace period during which the clause
+  cannot be paid, which the clause-defence model does not yet account for.
 
 ### Rivals and standings
 
@@ -294,6 +341,17 @@ Account `/5/login/{initial,register_with_mail,validate_mail,resend_pin,recover_p
   so match them by name, never by index**. Each selection carries one quote per
   bookmaker: `c` is the current price, `f` the opening one. Take the median across
   books, not the first, so one stale bookmaker cannot swing a fixture.
+- **A departed player looks completely normal.** Transfer a player out of the
+  league in real life and Futmondo keeps him in the championship: he holds a
+  squad slot, keeps a market value and a clause price, appears in
+  `/5/league/championshipplayers`, and can still be fielded. The only thing
+  that changes is `teamId`, which now points at a club with no fixtures. There
+  is no status flag: `status` is `""` for departed and present players alike,
+  and `average.fitness` is not a reliable tell either — one departed player in
+  this league has a populated `fitness` array. **The signal is the calendar:**
+  a club is in the competition if and only if `/2/league/matches` gives it
+  fixtures, so a player whose club has none has left. Live check: 7 of 526
+  championship players, against 20 clubs with fixtures.
 - **Values are integers in euros**, not millions.
 - **`answer` is sometimes a bare array** (`/1/userteam/roster`, `/1/market/players`)
   and sometimes an object wrapping one (`answer.ranking`, `answer.news`,

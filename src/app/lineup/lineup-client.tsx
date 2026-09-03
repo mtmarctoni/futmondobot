@@ -4,6 +4,7 @@ import type { AnalysisReport } from "@/lib/engine";
 
 import {
   Card,
+  DepartedBanner,
   Empty,
   ErrorBox,
   Loading,
@@ -38,6 +39,8 @@ export function LineupClient({ initial }: { initial: AnalysisReport }) {
         </div>
         <RefreshButton onClick={refresh} loading={loading} />
       </div>
+
+      <DepartedBanner departed={data.departed} />
 
       {currentFormation && currentFormation !== lineup.formation.label && (
         <p className="rounded-lg border border-amber-900/50 bg-amber-950/20 px-3 py-2 text-sm text-amber-200">

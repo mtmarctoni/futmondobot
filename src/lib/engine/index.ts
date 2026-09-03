@@ -17,6 +17,7 @@ import { FutmondoClient, type Scope } from "../futmondo/client";
 import { FutmondoError } from "../futmondo/errors";
 import type { FutmondoRole, PlayerStats } from "../futmondo/types";
 import { runClauses, type ClauseReport } from "./clauses";
+import { scanDepartures, type DepartedPlayer } from "./departed";
 import { evaluate, type EvaluateContext } from "./expected";
 import {
   diffLineup,
@@ -46,6 +47,13 @@ export interface AnalysisReport {
   market: MarketReport;
   clauses: ClauseReport;
   today: TodayReport;
+
+  /**
+   * Our players who are no longer in the competition. Separate from the squad
+   * list because holding one is a standing loss rather than a bad selection,
+   * and it has to be impossible to miss.
+   */
+  departed: DepartedPlayer[];
 
   rivalFunds: repo.RivalFunds[];
   nextRound: repo.RoundRow | null;
@@ -147,12 +155,52 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
   // ------------------------------------------------------------- history ---
   const history = await loadHistory();
 
+  // ------------------------------------------------------------ departed ---
+  // Run before evaluating, so a departure reaches the projection the same way
+  // an injury does: start probability zero, out of the XI, and out of the
+  // clause-steal candidates. Scanning the whole league rather than just our
+  // squad is what stops the engine offering a rival's departed player as a
+  // bargain steal on the strength of a low clause and a stale average.
+  const departures = scanDepartures(
+    [
+      ...roster.map((p) => ({
+        playerId: p.id,
+        name: p.name,
+        role: p.role,
+        clubId: p.teamId ?? null,
+        clubName: p.team ?? null,
+        value: p.value,
+        mine: true,
+        onMarket: p.onMarket,
+        askPrice: p.askPrice ?? null,
+      })),
+      ...history.ownership
+        .filter((row) => !roster.some((p) => p.id === row.playerId))
+        .map((row) => ({
+          playerId: row.playerId,
+          name: row.name,
+          role: row.role as FutmondoRole,
+          clubId: row.teamId ?? null,
+          clubName: row.teamName,
+          value: row.value ?? 0,
+        })),
+    ],
+    history.competitionClubs,
+  );
+  warnings.push(...departures.warnings);
+
+  // A departure is the stronger fact, so it wins over a stored injury note.
+  const unavailable = new Map(history.unavailable);
+  for (const [playerId, reason] of departures.reasons) {
+    unavailable.set(playerId, reason);
+  }
+
   // ------------------------------------------------------------ evaluate ---
   const ctx: EvaluateContext = {
     form: history.form,
     trends: history.trends,
     difficulty: history.difficulty,
-    unavailable: history.unavailable,
+    unavailable,
     startProbabilities: history.startProbabilities,
   };
 
@@ -271,6 +319,7 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
     lineupApplied: options.lineupApplied ?? false,
     market: marketReport,
     clauses: clauseReport,
+    departed: departures.mine,
     deadline: history.nextRound?.deadline ?? null,
     rules,
     now: options.now,
@@ -290,6 +339,7 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
     market: marketReport,
     clauses: clauseReport,
     today,
+    departed: departures.mine,
     rivalFunds: history.rivalFunds,
     nextRound: history.nextRound,
     warnings: [...warnings, ...history.warnings],
@@ -328,6 +378,8 @@ interface History {
   difficulty: repo.FixtureMap;
   unavailable: Map<string, string>;
   startProbabilities: Map<string, number>;
+  /** Real clubs with a fixture, id to name. The competition's own membership. */
+  competitionClubs: Map<string, string>;
   ownership: Awaited<ReturnType<typeof repo.getLatestOwnership>>;
   rivalFunds: repo.RivalFunds[];
   teamNames: Map<string, string | null>;
@@ -345,6 +397,7 @@ function emptyHistory(warnings: string[]): History {
     difficulty: new Map(),
     unavailable: new Map(),
     startProbabilities: new Map(),
+    competitionClubs: new Map(),
     ownership: [],
     rivalFunds: [],
     teamNames: new Map(),
@@ -380,6 +433,7 @@ async function loadHistory(): Promise<History> {
     difficulty,
     unavailable,
     startProbabilities,
+    competitionClubs,
     ownership,
     teams,
     nextRound,
@@ -394,6 +448,12 @@ async function loadHistory(): Promise<History> {
     ),
     safe(() => repo.getCurrentUnavailability(), new Map<string, string>(), warnings, "injuries"),
     safe(() => repo.getStartProbabilities(), new Map<string, number>(), warnings, "probable lineups"),
+    safe(
+      () => repo.getCompetitionClubs(),
+      new Map<string, string>(),
+      warnings,
+      "competition clubs",
+    ),
     safe(
       () => repo.getLatestOwnership(),
       [] as Awaited<ReturnType<typeof repo.getLatestOwnership>>,
@@ -451,6 +511,7 @@ async function loadHistory(): Promise<History> {
     difficulty,
     unavailable,
     startProbabilities,
+    competitionClubs,
     ownership,
     rivalFunds,
     teamNames: new Map(teams.map((t) => [t.teamId, t.teamName])),
@@ -560,9 +621,11 @@ function emptyReport(error: string, warnings: string[]): AnalysisReport {
       lineupApplied: false,
       market,
       clauses,
+      departed: [],
       deadline: null,
       rules,
     }),
+    departed: [],
     rivalFunds: [],
     nextRound: null,
     warnings,
@@ -576,3 +639,4 @@ export type { Action, TodayReport } from "./today";
 export type { LineupPick, LineupChange, Formation } from "./lineup";
 export type { MarketReport } from "./market";
 export type { ClauseReport } from "./clauses";
+export type { DepartedPlayer } from "./departed";
