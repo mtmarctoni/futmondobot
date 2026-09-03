@@ -76,6 +76,23 @@ describe("role", () => {
     expect(role("MC")).toBe("MED");
   });
 
+  // These four are exactly what the live API sends. The table used to be
+  // missing "centrocampista", and because an unmappable role makes basePlayer
+  // drop the player, every midfielder in the league disappeared from rosters,
+  // the market and the database. The old test asserted it mapped "every alias"
+  // while never trying the strings the API actually uses.
+  it("maps the lowercase Spanish roles the API really returns", () => {
+    expect(role("portero")).toBe("POR");
+    expect(role("defensa")).toBe("DEF");
+    expect(role("centrocampista")).toBe("MED");
+    expect(role("delantero")).toBe("DEL");
+  });
+
+  it("resolves unseen variants built on the same stems", () => {
+    expect(role("mediocentro")).toBe("MED");
+    expect(role("Centrocampista Ofensivo")).toBe("MED");
+  });
+
   it("returns undefined for an unknown role so the player is skipped", () => {
     expect(role("WINGBACK")).toBeUndefined();
     expect(role(undefined)).toBeUndefined();

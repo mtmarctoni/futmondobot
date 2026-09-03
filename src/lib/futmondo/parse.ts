@@ -117,16 +117,35 @@ const ROLE_ALIASES: Record<string, FutmondoRole> = {
   MC: "MED",
   MEDIO: "MED",
   CEN: "MED",
+  CENTROCAMPISTA: "MED",
   DEL: "DEL",
   FW: "DEL",
   DELANTERO: "DEL",
   ATT: "DEL",
 };
 
+/**
+ * The live API reports roles as lowercase Spanish words: portero, defensa,
+ * centrocampista, delantero. The table above had three of those four, and the
+ * missing one cost five players out of a fifteen-player squad -- silently,
+ * because basePlayer drops a player whose role it cannot map, so every
+ * midfielder in the league vanished from rosters, the market and the database
+ * at once, and the engine reported the squad as short of midfielders.
+ *
+ * The three-letter prefix fallback is what makes that class of omission
+ * survivable: PORtero, DEFensa, CENtrocampista and DELantero all resolve
+ * through the short aliases, as do MEDiocentro and any other variant built on
+ * the same stems. Accents are stripped first so an accented variant matches.
+ */
 export function role(v: unknown): FutmondoRole | undefined {
   const raw = str(v);
   if (!raw) return undefined;
-  return ROLE_ALIASES[raw.trim().toUpperCase()];
+  const norm = raw
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase();
+  return ROLE_ALIASES[norm] ?? ROLE_ALIASES[norm.slice(0, 3)];
 }
 
 function id(obj: Rec, ...extra: string[]): string | undefined {
