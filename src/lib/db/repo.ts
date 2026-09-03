@@ -196,7 +196,7 @@ export async function writeSnapshots(
        clause_price, owner_team_id, locked, market_price, captured_at
      )
      SELECT $1::date, * FROM UNNEST(
-       $2::text[], $3::bigint[], $4::int[], $5::numeric[],
+       $2::text[], $3::bigint[], $4::numeric[], $5::numeric[],
        $6::bigint[], $7::text[], $8::boolean[], $9::bigint[]
      ), now()
      ON CONFLICT (snapshot_date, player_id) DO UPDATE SET
@@ -568,7 +568,7 @@ export async function upsertRoundPoints(lineup: RoundLineup): Promise<number> {
        assists, yellow_cards, red_cards, started
      )
      SELECT $1::text, * FROM UNNEST(
-       $2::text[], $3::text[], $4::int[], $5::int[], $6::int[],
+       $2::text[], $3::text[], $4::numeric[], $5::int[], $6::int[],
        $7::int[], $8::int[], $9::int[], $10::boolean[]
      )
      ON CONFLICT (round_id, player_id, team_id) DO UPDATE SET

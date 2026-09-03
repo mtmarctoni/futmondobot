@@ -225,11 +225,18 @@ async function main() {
     String(r2?.deadline),
   );
 
+  // getNextRound is a global query by design, so it answers with the real
+  // calendar once one is stored. Asserting it returns the smoke fixture only
+  // held while the rounds table was empty. Check the contract instead: it
+  // returns the earliest round still ahead of us.
   const next = await repo.getNextRound();
+  const earliestAhead = (await repo.getRounds())
+    .filter((r) => r.deadline !== null && new Date(r.deadline) > new Date())
+    .sort((a, b) => (a.deadline ?? "").localeCompare(b.deadline ?? ""))[0];
   check(
-    "getNextRound finds the upcoming round",
-    next?.roundId === PREFIX + "r2",
-    String(next?.roundId),
+    "getNextRound returns the earliest round still ahead",
+    next?.roundId === earliestAhead?.roundId,
+    `${next?.roundId} vs ${earliestAhead?.roundId}`,
   );
 
   check(

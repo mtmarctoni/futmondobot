@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authFailureReason, isAuthorizedRequest } from "@/lib/auth";
-import { syncAll, syncClausePrices } from "@/lib/sync";
+import { syncAll, syncClausePrices, type SyncReport } from "@/lib/sync";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -19,7 +19,21 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const reports = await syncAll();
+  // syncAll must not be able to fail the request. An uncaught throw here
+  // returned a 500 with an empty body, hiding which job broke and why.
+  let reports: SyncReport[];
+  try {
+    reports = await syncAll();
+  } catch (err) {
+    reports = [
+      {
+        job: "syncAll",
+        wrote: {},
+        warnings: [err instanceof Error ? err.message : String(err)],
+        durationMs: 0,
+      },
+    ];
+  }
 
   // Clause prices are one request per player, so only a bounded slice runs per
   // invocation. Successive runs rotate through the staleset.

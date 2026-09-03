@@ -67,6 +67,17 @@ export function num(v: unknown): number | undefined {
   return undefined;
 }
 
+/**
+ * Scoring averages arrive either as a bare number or, in this league, as an
+ * object: {average, homeAverage, awayAverage, averageLastFive, matches,
+ * fitness}. Reading it with `num()` alone silently yielded undefined for every
+ * player, so the average column was never populated.
+ */
+export function avg(v: unknown): number | undefined {
+  if (isRec(v)) return num(pick(v, "average", "avg", "averageLastFive"));
+  return num(v);
+}
+
 export function bool(v: unknown): boolean | undefined {
   if (typeof v === "boolean") return v;
   if (typeof v === "string") {
@@ -147,7 +158,7 @@ function basePlayer(raw: Rec): Player | null {
     teamId,
     value: num(pick(raw, "value", "marketValue", "totalValue")) ?? 0,
     points: num(pick(raw, "points", "totalPoints", "seasonPoints")) ?? 0,
-    average: num(pick(raw, "average", "avg", "pointsAverage")),
+    average: avg(pick(raw, "average", "avg", "pointsAverage")),
     slug: str(pick(raw, "slug", "player_slug")),
     photo: str(pick(raw, "photo", "image", "avatar")),
     raw,

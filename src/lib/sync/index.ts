@@ -105,8 +105,21 @@ export async function syncDaily(client?: FutmondoClient): Promise<SyncReport> {
     warnings.push(`market: ${reason(err)}`);
   }
 
-  if (players.size > 0) wrote.players = await repo.upsertPlayers([...players.values()]);
-  if (snapshots.length > 0) wrote.snapshots = await repo.writeSnapshots(date, snapshots);
+  // These were the only unwrapped writes in the job. A failure here threw past
+  // every warning we had already collected, so the whole run reported nothing
+  // at all -- which is how a decimal-points schema mismatch looked like an
+  // empty 500 instead of a message naming the column.
+  try {
+    if (players.size > 0) wrote.players = await repo.upsertPlayers([...players.values()]);
+  } catch (err) {
+    warnings.push(`players: ${reason(err)}`);
+  }
+
+  try {
+    if (snapshots.length > 0) wrote.snapshots = await repo.writeSnapshots(date, snapshots);
+  } catch (err) {
+    warnings.push(`snapshots: ${reason(err)}`);
+  }
 
   return { job: "daily", wrote, warnings, durationMs: Date.now() - started };
 }
