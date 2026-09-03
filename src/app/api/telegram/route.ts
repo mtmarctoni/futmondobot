@@ -50,7 +50,8 @@ function rememberUpdate(id: string): void {
 }
 
 export async function POST(req: NextRequest) {
-  const secret = process.env.TELEGRAM_WEBHOOK_SECRET ?? process.env.CRON_SECRET;
+  const secret =
+    process.env.TELEGRAM_WEBHOOK_SECRET?.trim() || process.env.CRON_SECRET?.trim();
   if (secret && req.headers.get("x-telegram-bot-api-secret-token") !== secret) {
     return NextResponse.json({ ok: false }, { status: 401 });
   }

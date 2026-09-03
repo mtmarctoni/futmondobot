@@ -25,8 +25,13 @@ export interface InlineButton {
   callback_data: string;
 }
 
+/**
+ * Trimmed because the token is interpolated straight into a URL, and a value
+ * pasted with a stray space fails as "malformed URL" rather than as anything
+ * that names the real cause.
+ */
 function botToken(): string {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
   if (!token) throw new TelegramError("TELEGRAM_BOT_TOKEN is not set.");
   return token;
 }

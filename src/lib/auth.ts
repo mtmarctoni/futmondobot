@@ -5,7 +5,9 @@ import type { NextRequest } from "next/server";
  * API quota, so an unset CRON_SECRET denies access rather than allowing it.
  */
 export function isAuthorizedRequest(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
+  // Trimmed: surrounding whitespace on the stored value would reject every
+  // request with a correct secret, and look identical to a wrong one.
+  const secret = process.env.CRON_SECRET?.trim();
   if (!secret) return false;
 
   const header = req.headers.get("authorization");
