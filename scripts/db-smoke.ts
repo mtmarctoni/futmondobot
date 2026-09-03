@@ -150,6 +150,30 @@ async function main() {
     `value=${kept[0]?.value} clause=${kept[0]?.clause_price}`,
   );
 
+  // A rival-owned player who is also on the market arrives twice in one batch:
+  // once from the owner's roster, once from the market. Postgres refuses a
+  // second ON CONFLICT touch on the same row, so this must be folded before it
+  // reaches SQL -- and both halves must survive the fold.
+  const dupWritten = await repo.writeSnapshots(DAY, [
+    { playerId: PREFIX + "dup", value: 9_000_000, ownerTeamId: PREFIX + "t2", locked: true },
+    { playerId: PREFIX + "dup", marketPrice: 11_000_000 },
+  ]);
+  const dupRow = (await sql`
+    SELECT value, owner_team_id, locked, market_price FROM player_snapshots
+    WHERE player_id = ${PREFIX + "dup"} AND snapshot_date = ${DAY}`) as Record<
+    string,
+    unknown
+  >[];
+  check(
+    "writeSnapshots folds a duplicated player and keeps both halves",
+    dupWritten === 1 &&
+      Number(dupRow[0]?.value) === 9_000_000 &&
+      dupRow[0]?.owner_team_id === PREFIX + "t2" &&
+      dupRow[0]?.locked === true &&
+      Number(dupRow[0]?.market_price) === 11_000_000,
+    `rows=${dupWritten} value=${dupRow[0]?.value} owner=${dupRow[0]?.owner_team_id} locked=${dupRow[0]?.locked} market=${dupRow[0]?.market_price}`,
+  );
+
   const historyRows = await repo.getValueHistory(PREFIX + "fw", 20_000);
   check(
     "getValueHistory returns ISO dates, newest first",

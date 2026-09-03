@@ -184,10 +184,44 @@ export interface SnapshotInput {
  * COALESCE keeps facts learned by an earlier, richer pass — a cheap roster
  * sync must not wipe a clause price a summary sweep already found.
  */
+/**
+ * Folds repeated rows for one player into a single row, mirroring the SQL's
+ * COALESCE: a later defined value wins, and an undefined one never clobbers a
+ * known fact.
+ *
+ * A batch legitimately contains the same player twice. A rival-owned player who
+ * is also listed on the market arrives once from their owner's roster (owner,
+ * locked, clause) and once from the market (price). Postgres refuses to let one
+ * ON CONFLICT statement touch the same row twice, so without this the whole
+ * day's snapshot write failed. Merging rather than dropping keeps both halves.
+ */
+export function mergeSnapshots(rows: SnapshotInput[]): SnapshotInput[] {
+  const merged = new Map<string, SnapshotInput>();
+  for (const row of rows) {
+    const prev = merged.get(row.playerId);
+    if (!prev) {
+      merged.set(row.playerId, { ...row });
+      continue;
+    }
+    merged.set(row.playerId, {
+      playerId: row.playerId,
+      value: row.value ?? prev.value,
+      points: row.points ?? prev.points,
+      average: row.average ?? prev.average,
+      clausePrice: row.clausePrice ?? prev.clausePrice,
+      ownerTeamId: row.ownerTeamId ?? prev.ownerTeamId,
+      locked: row.locked ?? prev.locked,
+      marketPrice: row.marketPrice ?? prev.marketPrice,
+    });
+  }
+  return [...merged.values()];
+}
+
 export async function writeSnapshots(
   date: string,
-  rows: SnapshotInput[],
+  input: SnapshotInput[],
 ): Promise<number> {
+  const rows = mergeSnapshots(input);
   if (rows.length === 0) return 0;
   const sql = getSql();
   await sql.query(
