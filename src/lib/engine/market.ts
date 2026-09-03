@@ -79,7 +79,11 @@ export function maxOffer(ctx: MarketContext): number {
   const computed = ctx.funds + ctx.teamValue * ctx.rules.maxOfferTeamValueShare;
   // Trust Futmondo's own ceiling when it gives one; ours is derived from the
   // settings and could drift if the league is reconfigured.
-  return ctx.reportedMaxBid ?? computed;
+  //
+  // Floored to whole euros: money in this game is integer euros, and a share of
+  // team value lands on a fraction. Rounding up would offer a cent more than
+  // the ceiling allows, so the ceiling rounds down.
+  return Math.floor(ctx.reportedMaxBid ?? computed);
 }
 
 export function runMarket(ctx: MarketContext): MarketReport {

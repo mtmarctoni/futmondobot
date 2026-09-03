@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  parseOdds,
+  parsePlayerStats,
   asArray,
   num,
   parseActiveChampionships,
@@ -345,6 +347,66 @@ describe("parseRoundsWithMatches", () => {
     });
     expect(rounds[0].matches).toEqual([]);
   });
+
+  /**
+   * The shape /2/league/matches actually returns. The old test above used the
+   * long `home`/`away` spellings, which this endpoint has never sent, so it
+   * passed while all 380 real fixtures stored a null team id -- and fixture
+   * difficulty, which can only reach a player through their club id, was dead.
+   */
+  it("reads the h and a keys the endpoint really sends", () => {
+    const rounds = parseRoundsWithMatches({
+      rounds: [
+        {
+          _id: "6a4af7efae633549bd0f037f",
+          number: 1,
+          status: "closed",
+          matches: [
+            {
+              _id: "6a4af7efae633549bd0f0382",
+              info: { date: "2026-08-27T19:00:00.000Z" },
+              st: "F",
+              h: { id: "t-fcb", score: 2, name: "Barcelona", shortname: "FCB" },
+              a: { id: "t-ath", score: 0, name: "Athletic de Bilbao", shortname: "ATH" },
+            },
+          ],
+        },
+      ],
+    });
+    expect(rounds[0].matches[0]).toMatchObject({
+      homeTeamId: "t-fcb",
+      awayTeamId: "t-ath",
+      homeTeamName: "Barcelona",
+      awayTeamName: "Athletic de Bilbao",
+      homeScore: 2,
+      awayScore: 0,
+      finished: true,
+    });
+  });
+
+  it("does not read a 0-0 off a fixture that has not been played", () => {
+    const rounds = parseRoundsWithMatches({
+      rounds: [
+        {
+          _id: "r1",
+          number: 6,
+          status: "next",
+          matches: [
+            {
+              _id: "m9",
+              info: { date: "2027-09-05T19:00:00Z" },
+              st: "N",
+              h: { id: "t1", score: 0, name: "Home" },
+              a: { id: "t2", score: 0, name: "Away" },
+            },
+          ],
+        },
+      ],
+    });
+    expect(rounds[0].matches[0]).toMatchObject({ finished: false });
+    expect(rounds[0].matches[0].homeScore).toBeUndefined();
+    expect(rounds[0].matches[0].awayScore).toBeUndefined();
+  });
 });
 
 describe("parseRoundLineup", () => {
@@ -482,5 +544,123 @@ describe("parseMoneyEvents", () => {
       teamName: "Bichos Team",
       amount: 15000000,
     });
+  });
+});
+
+describe("parsePlayerStats", () => {
+  // The shape /1/userteam/roster really returns under `average`.
+  const RAW = {
+    average: 4.066666666666666,
+    homeAverage: 4.3,
+    awayAverage: 3.6,
+    averageLastFive: 4.066666666666666,
+    matches: 3,
+    fitness: [4.1, 3.6, 4.5],
+  };
+
+  it("reads the whole scoring record, not just the headline average", () => {
+    const stats = parsePlayerStats(RAW);
+    expect(stats).toEqual({
+      average: 4.066666666666666,
+      homeAverage: 4.3,
+      awayAverage: 3.6,
+      averageLastFive: 4.066666666666666,
+      matches: 3,
+      fitness: [4.1, 3.6, 4.5],
+    });
+  });
+
+  it("keeps the zero that marks a round the player missed", () => {
+    // Real payload: two appearances across three rounds.
+    const stats = parsePlayerStats({ average: 4.1, matches: 2, fitness: [6, 2.2, 0] });
+    expect(stats?.fitness).toEqual([6, 2.2, 0]);
+    expect(stats?.matches).toBe(2);
+  });
+
+  it("reports a debutant as no evidence rather than as a zero scorer", () => {
+    const stats = parsePlayerStats({ average: 0, matches: 0, fitness: [] });
+    expect(stats).toEqual({
+      average: 0,
+      homeAverage: undefined,
+      awayAverage: undefined,
+      averageLastFive: undefined,
+      matches: 0,
+      fitness: [],
+    });
+  });
+
+  it("returns nothing for a payload that carries no average at all", () => {
+    expect(parsePlayerStats({ matches: 3 })).toBeUndefined();
+    expect(parsePlayerStats(7)).toBeUndefined();
+    expect(parsePlayerStats(null)).toBeUndefined();
+  });
+});
+
+describe("parseOdds", () => {
+  /**
+   * /5/match/odds returns every market the bookmakers price, not a flat
+   * result. Reading it as a flat object found nothing, so no fixture was ever
+   * priced and every opponent scored as neutral.
+   */
+  const REAL = {
+    odds: [
+      {
+        mn: "Half Time/Full Time",
+        sels: [{ ssn: "2/2", odds: [{ c: 6.85, f: 5.3, bid: "1xbet" }] }],
+      },
+      {
+        mn: "Match Result",
+        // Note the order: away, draw, home. Selections must be matched by name.
+        sels: [
+          { ssn: "2", odds: [{ c: 4.1, f: 4.0, bid: "a" }, { c: 4.2, f: 4.1, bid: "b" }] },
+          { ssn: "X", odds: [{ c: 3.66, f: 3.5, bid: "a" }] },
+          { ssn: "1", odds: [{ c: 1.85, f: 1.9, bid: "a" }] },
+        ],
+      },
+      { mn: "Correct Score", sels: [{ ssn: "1-0", odds: [{ c: 7.5, bid: "a" }] }] },
+    ],
+  };
+
+  it("finds the 1X2 market among all the others and keys it by selection", () => {
+    const odds = parseOdds("m1", REAL);
+    expect(odds?.home).toBe(1.85);
+    expect(odds?.draw).toBe(3.66);
+    // Median of the two books, so 4.1 and 4.2 do not average into a new price.
+    expect(odds?.away).toBe(4.2);
+  });
+
+  it("takes the median across books so one stale price cannot swing a fixture", () => {
+    const odds = parseOdds("m1", {
+      odds: [
+        {
+          mn: "Match Result",
+          sels: [
+            { ssn: "1", odds: [{ c: 2.0 }, { c: 2.1 }, { c: 9.9 }] },
+            { ssn: "X", odds: [{ c: 3.4 }] },
+            { ssn: "2", odds: [{ c: 3.5 }] },
+          ],
+        },
+      ],
+    });
+    expect(odds?.home).toBe(2.1);
+  });
+
+  it("ignores a quote no bookmaker would offer", () => {
+    const odds = parseOdds("m1", {
+      odds: [{ mn: "Match Result", sels: [{ ssn: "1", odds: [{ c: 0.5 }, { c: 2.5 }] }] }],
+    });
+    expect(odds?.home).toBe(2.5);
+  });
+
+  it("returns nothing when the result market is absent", () => {
+    expect(
+      parseOdds("m1", { odds: [{ mn: "Total Goals", sels: [{ ssn: "+2.5", odds: [{ c: 1.8 }] }] }] }),
+    ).toBeNull();
+    expect(parseOdds("m1", { odds: [] })).toBeNull();
+  });
+
+  it("still reads a flat shape, in case one is ever served", () => {
+    const odds = parseOdds("m1", { odds: { home: 1.5, draw: 4, away: 6 } });
+    expect(odds).toMatchObject({ home: 1.5, draw: 4, away: 6 });
   });
 });

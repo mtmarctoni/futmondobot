@@ -131,7 +131,7 @@ but market endpoints take `player_id` and `player_slug` in snake_case.
 | `/1/userteam/roster` | `{championshipId, userteamId}` | `answer[]` of `{id, name, role, team, value, buyPrice}` |
 | `/1/userteam/lineup` | `{championshipId, userteamId}` | Current XI, bench and strategy string (e.g. `"4-3-3"`) |
 | `/1/userteam/rounds` | `{championshipId, userteamId}` | `answer[]` of `{id, number, status}`, status ∈ `closed`/`running`/`open` |
-| `/1/userteam/roundlineup` | `{championshipId, round: <roundId>, userteamId}` | **Per-player per-round `points` plus `detailedPoints.data`** (`mins_played`, `goals`, `goal_assist`, `yellow_card`, …). Works for *any* team in the league |
+| `/1/userteam/roundlineup` | `{championshipId, round: <roundId>, userteamId}` | Documented as per-player per-round `points` plus `detailedPoints.data`. **In this league it returns `players: []` for every closed round** — see the trap below |
 | `/1/userteam/moneymovements` | `{championshipId, userteamId}` | Your cash ledger |
 | `/1/userteam/dreamteam` | `{championshipId, round}` | Round's ideal XI (relevant to the "equipo ideal" prima) |
 | `/1/userteam/nightmareteam` | `{championshipId, round}` | Worst XI |
@@ -225,14 +225,14 @@ money events is the only way to reconstruct how much cash each rival has.
 | `/2/team/matches` | `{teamId}` | Full fixture list |
 | `/2/team/summary` | `{teamId}` | Club summary |
 | `/1/team/players` | `{teamId}` | Club squad |
-| `/2/league/matches` | `{leagueId}` | `answer.rounds[]` of `{_id, number, status, matches[]}`, each match with `info.date` — **the deadline is derivable from this** |
+| `/2/league/matches` | `{leagueId}` | `answer.rounds[]` of `{_id, number, status, matches[]}`. Each match is `{_id, info.date, st, h, a}` — **the two sides are `h` and `a`**, each `{id, name, slug, shortname, score}`. `st: "F"` means full time, and only then do the scores mean anything. The round deadline is the earliest `info.date` |
 | `/2/league/standing` | `{leagueId}` | Real league table |
 | `/2/league/players` | `{leagueId}` | All players in the competition |
 | `/2/match/bydate` | `{from, to}` | `answer.matches[]` in a date window |
 | `/2/match/statistics` | `{matchId}` | Match stats |
 | `/2/match/fetchmatch` | `{matchId}` | Match detail |
 | `/2/match/oponentslastmatches` | `{matchId}` | Head-to-head form |
-| `/5/match/odds` | `{matchId}` | **Bookmaker odds** — the best available fixture-difficulty signal |
+| `/5/match/odds` | `{matchId}` | **Bookmaker odds** — the best fixture-difficulty signal. Not a flat result: `answer.odds[]` is one entry per betting market. See the trap below |
 | `/1/match/list` | `{championshipId, roundId}` | |
 | `/1/player/fullprofile` | `{playerId}` | Full player profile |
 | `/2/player/statistics` | `{playerId}` | Season stats |
@@ -266,6 +266,34 @@ Account `/5/login/{initial,register_with_mail,validate_mail,resend_pin,recover_p
   250–400 ms) rather than firing `Promise.all`.
 - **Round ids, not numbers.** `/1/ranking/round` and `/1/userteam/roundlineup` both
   want the round's Mongo `_id`. Passing the integer matchday silently returns nothing.
+- **`/1/userteam/roundlineup` returns no players here.** With a correct championship
+  id, userteam id and closed-round `_id` it answers
+  `{pro, strategy: "4-4-2", players: [], budget, bench, pointSystem}` — the right
+  formation, and an empty squad. It is not an auth or an id problem; it looks like a
+  successful call that found nothing, which is why `round_points` sat empty while
+  `backfillRoundPoints` reported success. **Per-round minutes are therefore
+  unavailable**, and the expected-points model reads the scoring record off the
+  roster payload instead (below). `backfillRoundPoints` now warns rather than
+  spending nine requests a round in silence.
+- **The scoring record lives on `average`.** Every player in `/1/userteam/roster` and
+  `/1/market/players` carries
+  `average: {average, homeAverage, awayAverage, averageLastFive, matches, fitness[]}`.
+  This is the only per-player evidence the API gives up, so the whole form model
+  rests on it. `average` is per match *played*; `averageLastFive` is per *round*,
+  counting a missed round as zero, so the two diverge exactly when a player loses
+  their place. `fitness[]` is points per round in order with a zero for a round not
+  played, which makes `fitness.length` rounds elapsed and
+  `fitness.length - matches` rounds missed. A player who has appeared reports
+  `matches: 0, fitness: []` until they first feature, which is no evidence rather
+  than a zero score.
+- **`/5/match/odds` returns every market, not a result.** `answer.odds[]` is one entry
+  per betting market: `{mn: "Match Result" | "Correct Score" | "Total Goals" |
+  "Half Time/Full Time" | …, sels: [{ssn, sn, odds: [{c, f, bid, lu}, …]}]}`. The 1X2
+  market is `mn: "Match Result"`, whose three selections are `ssn` `"1"` (home),
+  `"X"` and `"2"` (away) — **in a different order in the payload than in the client,
+  so match them by name, never by index**. Each selection carries one quote per
+  bookmaker: `c` is the current price, `f` the opening one. Take the median across
+  books, not the first, so one stale bookmaker cannot swing a fixture.
 - **Values are integers in euros**, not millions.
 - **`answer` is sometimes a bare array** (`/1/userteam/roster`, `/1/market/players`)
   and sometimes an object wrapping one (`answer.ranking`, `answer.news`,

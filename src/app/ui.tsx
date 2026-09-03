@@ -257,7 +257,10 @@ export function PlayerRow({
             </span>
           )}
         </div>
-        <p className="truncate text-xs text-zinc-500">
+        {/* Wraps rather than truncating: the notes are the reasoning behind
+            the number, and clipping them was what made the projection look
+            arbitrary. */}
+        <p className="text-xs leading-relaxed text-zinc-500">
           {player.clubName ?? "—"} · {player.notes.join(" · ")}
         </p>
       </div>

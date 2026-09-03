@@ -44,6 +44,34 @@ export interface UserTeamInformation {
   raw: Record<string, unknown>;
 }
 
+/**
+ * The scoring record the roster and market payloads already carry under
+ * `average`. Until `/1/userteam/roundlineup` gives up its per-round rows this
+ * is the only per-player evidence there is, so the expected-points model reads
+ * it directly rather than waiting for history that may never arrive.
+ *
+ * `average` is per match *played*; `averageLastFive` is per *round*, counting a
+ * round missed as zero. The two differ once a player starts missing games, and
+ * that difference is the signal that they have lost their place.
+ */
+export interface PlayerStats {
+  /** Points per match actually played. */
+  average: number;
+  /** Same, split by venue. Half the sample, so weight it accordingly. */
+  homeAverage?: number;
+  awayAverage?: number;
+  /** Mean over the last five rounds, with a round missed counting as zero. */
+  averageLastFive?: number;
+  /** Matches played: the sample size behind `average`. */
+  matches: number;
+  /**
+   * Points per round in chronological order, zero for a round not played.
+   * `fitness.length` is therefore rounds elapsed, and
+   * `fitness.length - matches` is rounds missed.
+   */
+  fitness: number[];
+}
+
 /** `/1/userteam/roster` and `/1/market/players` share most of their shape. */
 export interface Player {
   id: string;
@@ -59,6 +87,8 @@ export interface Player {
   points: number;
   /** Points per appearance, as Futmondo reports it. */
   average?: number;
+  /** The full scoring record, when the payload carries one. */
+  stats?: PlayerStats;
   slug?: string;
   photo?: string;
   raw: Record<string, unknown>;
@@ -103,6 +133,11 @@ export interface Match {
   awayTeamId?: string;
   homeTeamName?: string;
   awayTeamName?: string;
+  /** Final score, once played. The fallback strength signal when odds are absent. */
+  homeScore?: number;
+  awayScore?: number;
+  /** True once the fixture has been played out. */
+  finished?: boolean;
   raw: Record<string, unknown>;
 }
 
