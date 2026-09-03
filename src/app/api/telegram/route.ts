@@ -35,6 +35,20 @@ interface TelegramUpdate {
  */
 const handledUpdates = new Set<string>();
 
+/** Bounded so a long-lived warm instance cannot grow the set without limit. */
+const MAX_HANDLED_UPDATES = 500;
+
+function rememberUpdate(id: string): void {
+  handledUpdates.add(id);
+  if (handledUpdates.size > MAX_HANDLED_UPDATES) {
+    // Insertion-ordered, so the oldest ids are the first to go.
+    for (const stale of handledUpdates) {
+      handledUpdates.delete(stale);
+      if (handledUpdates.size <= MAX_HANDLED_UPDATES) break;
+    }
+  }
+}
+
 export async function POST(req: NextRequest) {
   const secret = process.env.TELEGRAM_WEBHOOK_SECRET ?? process.env.CRON_SECRET;
   if (secret && req.headers.get("x-telegram-bot-api-secret-token") !== secret) {
@@ -174,7 +188,7 @@ async function handleCommand(chat: number, text: string): Promise<void> {
         lines.push("", "<b>Yours at risk</b>");
         for (const risk of exposed) {
           lines.push(
-            `${risk.alreadyLocked ? "🔒" : "•"} <b>${escapeHtml(risk.player.name)}</b> — ${escapeHtml(risk.reason)}`,
+            `${risk.alreadyLocked ? "[blocked]" : "•"} <b>${escapeHtml(risk.player.name)}</b> — ${escapeHtml(risk.reason)}`,
           );
         }
       }
@@ -225,7 +239,7 @@ async function handleCallback(
       await answerCallback(queryId);
       return;
     }
-    handledUpdates.add(queryId);
+    rememberUpdate(queryId);
   }
 
   const action = query.data ? decodeCallback(query.data) : null;

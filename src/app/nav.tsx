@@ -14,7 +14,7 @@ export function Nav() {
     <header className="border-b border-zinc-800">
       <div className="mx-auto flex w-full max-w-5xl items-center justify-between px-4 py-3">
         <Link href="/" className="font-semibold tracking-tight">
-          ⚽ FutmondoBot
+          FutmondoBot
         </Link>
         <nav className="flex items-center gap-1 text-sm">
           {links.map((l) => (

@@ -115,7 +115,7 @@ export async function notify(
 }
 
 const URGENCY_MARK: Record<Action["urgency"], string> = {
-  now: "‼️",
+  now: "!!",
   today: "•",
   whenever: "◦",
 };
