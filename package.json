@@ -10,6 +10,10 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "guards": "tsx scripts/ci-guards.ts",
+    "guards:verify": "bash scripts/verify-guards.sh",
+    "verify": "pnpm typecheck && pnpm lint && pnpm guards && pnpm test",
     "db:migrate": "dotenv -e .env.local -- tsx scripts/migrate.ts",
     "db:smoke": "dotenv -e .env.local -- tsx scripts/db-smoke.ts"
   },
@@ -24,6 +28,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@vitest/coverage-v8": "^4.1.11",
     "dotenv-cli": "^11.0.0",
     "eslint": "^9",
     "eslint-config-next": "16.3.4",
@@ -32,5 +37,9 @@
     "typescript": "^5",
     "vitest": "^4.1.11"
   },
-  "packageManager": "pnpm@11.17.0"
+  "packageManager": "pnpm@11.17.0",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=11.0.0"
+  }
 }

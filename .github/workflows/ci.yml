@@ -1,0 +1,148 @@
+name: CI
+
+# Every gate here runs without a single secret, so it is safe on a pull
+# request from anywhere, including one opened by an agent. Anything needing
+# real credentials lives in live-checks.yml and never triggers from a PR.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A superseded run answers a question nobody is asking any more. Results on
+# main are kept, because each commit there is what got deployed.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  typecheck:
+    name: Types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: pnpm typecheck
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: pnpm lint
+
+  test:
+    name: Tests and coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      # Coverage floors are a ratchet set in vitest.config.mts. A drop below
+      # one fails here, so untested code cannot arrive quietly.
+      - run: pnpm test:coverage
+      - name: Coverage summary
+        if: always()
+        run: node scripts/coverage-summary.mjs >> "$GITHUB_STEP_SUMMARY"
+
+  guards:
+    name: House rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Full history: the migration and parser-fixture rules compare this
+          # branch against its merge base, which a shallow clone cannot find.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: pnpm guards
+
+  guards-self-test:
+    name: House rules can fail
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      # Injects a real violation per rule and asserts each one is caught. A
+      # guard whose pattern silently stopped matching would otherwise read as
+      # a pass for ever.
+      - run: pnpm guards:verify
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      # Keeps the Next.js compiler cache between runs. Correctness never
+      # depends on it, so a stale or missing cache only costs time.
+      - uses: actions/cache@v4
+        with:
+          path: .next/cache
+          key: next-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ hashFiles('src/**', 'next.config.ts') }}
+          restore-keys: |
+            next-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
+            next-${{ runner.os }}-
+      # No environment variables on purpose. Every page is force-dynamic and
+      # the database client is built lazily, so a build that starts needing a
+      # secret means something now runs at build time that should not.
+      - run: pnpm build
+
+  workflows:
+    name: Workflow and shell lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # Checks the workflow files themselves: expression syntax, action input
+      # names, and shellcheck over every run block. It caught a malformed
+      # expression in this very file that would only have surfaced as a failed
+      # run on main.
+      - uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
+
+      - name: Shellcheck the scripts
+        run: shellcheck scripts/*.sh
+
+  # One check to require in branch protection, so adding a job above does not
+  # mean editing the repository settings.
+  ci:
+    name: CI
+    if: always()
+    needs: [typecheck, lint, test, guards, guards-self-test, build, workflows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every gate passed
+        # Through the environment rather than interpolated into the script:
+        # an expression expanded inline is substituted before the shell parses
+        # the line, which is how a workflow ends up executing its own inputs.
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "gate results: ${RESULTS}"
+          for result in ${RESULTS}; do
+            if [ "${result}" != "success" ]; then
+              echo "A required gate did not pass."
+              exit 1
+            fi
+          done
+          echo "All gates passed."

@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Generated. Flat config does not read .gitignore, so coverage output
+    // would otherwise be linted and report on vendored report scripts.
+    "coverage/**",
   ]),
 ]);
 

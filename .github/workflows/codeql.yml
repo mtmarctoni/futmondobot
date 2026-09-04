@@ -1,0 +1,35 @@
+name: CodeQL
+
+# Free on public repositories and it reads the code rather than running it, so
+# it catches the classes of bug review misses: an unsanitised value reaching a
+# query, a secret on a path that logs, an unchecked redirect.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, so a newly published rule finds existing code without waiting
+    # for someone to touch the file.
+    - cron: "0 8 * * 1"
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          queries: security-and-quality
+      - uses: github/codeql-action/analyze@v4

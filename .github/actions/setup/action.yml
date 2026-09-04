@@ -1,0 +1,20 @@
+name: Setup
+description: Node, pnpm, and dependencies installed exactly as the lockfile pins them.
+
+runs:
+  using: composite
+  steps:
+    # Reads the version from packageManager in package.json, so CI and a
+    # developer machine cannot drift onto different pnpm majors.
+    - uses: pnpm/action-setup@v4
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version-file: .nvmrc
+        cache: pnpm
+
+    # --frozen-lockfile is itself a check: it fails when package.json and
+    # pnpm-lock.yaml disagree, which is what a hand-edited dependency looks
+    # like. Never relax it to make a build pass.
+    - run: pnpm install --frozen-lockfile
+      shell: bash

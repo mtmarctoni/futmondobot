@@ -135,15 +135,27 @@ These are load-bearing. Breaking one produces a bug that is expensive and quiet.
 ## Verify before claiming done
 
 ```bash
-pnpm typecheck && pnpm lint && pnpm test    # 185 unit tests, no network
+pnpm verify     # typecheck, lint, guards, 185 unit tests. No network
 pnpm build
-pnpm db:smoke                               # 29 checks against the real database
+pnpm db:smoke   # 29 checks against the real database
 ```
+
+`pnpm guards` (inside `pnpm verify`) enforces the hard rules above as something
+a machine can refuse: money-spending calls confined to the confirmed-tap route,
+the ledger append-only, dates only through `isoDay`/`isoInstant`, no `any`, no
+committed `.only`, migrations forward-only, and a changed `pick()` lookup in
+`parse.ts` requiring a test change. Each failure prints the rule it enforces.
+**If a guard is wrong for your change, say so in the pull request and change the
+rule in the same commit; do not work around it.**
 
 `pnpm db:smoke` is the one that matters most when changing `src/lib/db/repo.ts`:
 the `UNNEST` casts cannot be checked by unit tests, and it already caught two
 real date bugs. It creates only `smoke-` prefixed rows and cleans up on failure,
-so it is safe against a live database.
+so it is safe against a live database. It is not a pull request gate, because
+that would mean handing pull request code the production database URL, so run
+it yourself for any change under `src/lib/db/`.
+
+Full tier-by-tier detail, and what to do when a check fails: `docs/CI.md`.
 
 Live Futmondo calls need real credentials in `.env.local`. With them set,
 `GET /api/futmondo` (needs `Authorization: Bearer $CRON_SECRET`) reports each
