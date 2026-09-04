@@ -43,7 +43,7 @@ jobs:
     # run pauses for approval before the database URL is handed to a job.
     environment: live
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
