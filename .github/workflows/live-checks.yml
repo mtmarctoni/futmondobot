@@ -1,0 +1,113 @@
+name: Live checks
+
+# These jobs hold real credentials, so nothing here is reachable from a pull
+# request. That is deliberate: this repository is public and pull requests are
+# expected from an agent, and a PR-triggered job runs the pull request's own
+# workflow file. Any trigger a contributor can cause is a trigger that can be
+# rewritten to print the secrets it was given.
+#
+# Run them by hand from the Actions tab when a change touches src/lib/db or
+# src/lib/futmondo, and let the schedule catch a production that has quietly
+# stopped working.
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Which checks to run
+        type: choice
+        default: both
+        options: [both, database, production]
+  schedule:
+    # 07:00 UTC, an hour after the sync cron at 06:00. History cannot be
+    # backfilled (AGENTS.md hard rule 5), so a day the sync silently failed is
+    # a day of value trends lost for good. This is how that gets noticed on
+    # the day it happens rather than a week later.
+    - cron: "0 7 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-checks
+  cancel-in-progress: false
+
+env:
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  database:
+    name: Database smoke
+    if: github.event_name == 'schedule' || contains(fromJSON('["both","database"]'), inputs.job)
+    runs-on: ubuntu-latest
+    # Configure this environment with yourself as a required reviewer so a
+    # run pauses for approval before the database URL is handed to a job.
+    environment: live
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+
+      # The 29 assertions here are the only thing that checks the UNNEST casts
+      # in src/lib/db/repo.ts, which no unit test can reach, and they have
+      # already caught two real date bugs. The script writes only smoke-
+      # prefixed rows and cleans up on failure, so it is safe against the live
+      # database.
+      #
+      # Called through tsx rather than `pnpm db:smoke`, which wraps it in
+      # dotenv to read a .env.local that does not exist on a runner.
+      - name: Run smoke assertions
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "DATABASE_URL is not configured for the 'live' environment."
+            exit 1
+          fi
+          pnpm exec tsx scripts/db-smoke.ts
+
+  production:
+    name: Production canary
+    if: github.event_name == 'schedule' || contains(fromJSON('["both","production"]'), inputs.job)
+    runs-on: ubuntu-latest
+    environment: live
+    steps:
+      # Asks the deployed app to exercise every Futmondo endpoint and report
+      # each one separately. This is how an inferred payload shape is found to
+      # have been wrong: the parsers are total, so a broken endpoint degrades
+      # one feature and returns empty rather than raising anything.
+      - name: Check every endpoint
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "${APP_URL}" ] || [ -z "${CRON_SECRET}" ]; then
+            echo "APP_URL and CRON_SECRET must be configured for the 'live' environment."
+            exit 1
+          fi
+
+          status=$(curl -sS -o health.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "${APP_URL%/}/api/futmondo")
+
+          if [ "${status}" != "200" ]; then
+            echo "GET /api/futmondo returned HTTP ${status}"
+            # The body can carry account details and these logs are public,
+            # so only the error field is printed, never the payload.
+            jq -r '.error // .step // "no error field"' health.json 2>/dev/null || true
+            exit 1
+          fi
+
+          # Per-endpoint status only. No values: the response includes funds,
+          # squad names and scope ids.
+          jq -r '.checks | to_entries[] | "\(if .value.ok then "ok  " else "FAIL" end) \(.key)\(if .value.ok then "" else ": " + (.value.error // "unknown") end)"' health.json
+
+          jq -e '.ok == true and (.checks | length > 0) and ([.checks[].ok] | all)' health.json > /dev/null || {
+            echo
+            echo "At least one endpoint is unhealthy. An inferred payload shape may have changed:"
+            echo "the parsers are total, so this degrades a feature silently rather than erroring."
+            exit 1
+          }
+
+          echo
+          echo "Every endpoint healthy."

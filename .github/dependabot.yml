@@ -1,0 +1,27 @@
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    # One grouped pull request a month rather than a stream of them: the point
+    # of this project is spending less time on it. Security advisories still
+    # arrive separately and immediately, which is the part that matters.
+    groups:
+      all-dependencies:
+        patterns: ["*"]
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "chore"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "chore"
