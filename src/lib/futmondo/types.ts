@@ -89,6 +89,18 @@ export interface Player {
   average?: number;
   /** The full scoring record, when the payload carries one. */
   stats?: PlayerStats;
+  /**
+   * Futmondo's own availability marker, present on every roster and market row.
+   *
+   * Observed values across all nine rosters: `""` (110), `"ok"` (16),
+   * `"doubt"` (10), `"injured"` (2), `"injured2"` (3), `"redcard"` (1). `"ok"`
+   * is a *positive* marker — a player returning to fitness — not an absence,
+   * and reading it as one would bench exactly the players who just recovered.
+   *
+   * It arrives in calls we already make, and it covers market listings that
+   * `/2/team/unavailableplayers` never reaches.
+   */
+  status?: string;
   slug?: string;
   photo?: string;
   raw: Record<string, unknown>;
@@ -107,6 +119,21 @@ export interface RosterPlayer extends Player {
   askPrice?: number;
 }
 
+/**
+ * A standing offer on a listing. Only `/1/market/myplayers` exposes these.
+ *
+ * Identity is sealed inconsistently: a bid placed through the market comes back
+ * with `userTeam: {name: "", slug: ""}`, while a direct roster bid from a rival
+ * carries their team name in full. So the absence of a name is a fact about the
+ * kind of bid, not about the endpoint.
+ */
+export interface MarketBid {
+  id?: string;
+  price: number;
+  /** Present for a rival's direct roster bid; blanked for a market bid. */
+  bidderTeamName?: string;
+}
+
 export interface MarketPlayer extends Player {
   /** Asking price. Differs from `value` when a user set it. */
   price: number;
@@ -116,7 +143,34 @@ export interface MarketPlayer extends Player {
   sellerTeamId?: string;
   /** When the listing closes, if reported. */
   expiresAt?: string;
-  bids?: number;
+  /**
+   * How many offers stand on the listing.
+   *
+   * The field is `numberOfBids` and its value is the **string** `"-"` when
+   * hidden, which is why it is `number | null` rather than a plain number: the
+   * parser used to look for `bids`/`numBids`/`offers` and run a strict numeric
+   * conversion over the result, so it was permanently undefined.
+   *
+   * Do not make decisions on it until OPEN-3 establishes what it counts: it
+   * came back as 20 for a 1M injured defender in a nine-member league.
+   */
+  numberOfBids: number | null;
+  /** The bids themselves. Populated only by `/1/market/myplayers`. */
+  bids?: MarketBid[];
+}
+
+/**
+ * `/1/market/playerauctionsummary` with `{championshipId, userteamId, player_id}`.
+ * It rejects a slug, and errors `market.playerAuctionSummary.needTeamId`
+ * without the team.
+ */
+export interface AuctionSummary {
+  playerId: string;
+  /** The minimum bid step. The direct answer to "how much should I bid". */
+  increment: number | null;
+  /** See MarketPlayer.numberOfBids: not trustworthy yet. */
+  numberOfBids: number | null;
+  raw: Record<string, unknown>;
 }
 
 /** `/1/userteam/rounds` and `/2/league/matches` rounds. */
@@ -173,13 +227,66 @@ export interface RankedTeam {
   raw: Record<string, unknown>;
 }
 
-/** `/1/player/summary` — carries the clause price nothing else exposes. */
+/** One round from `/1/player/summary`'s `points[]`. A measured start record. */
+export interface PlayerRoundRecord {
+  /** Matchday number, not a round id. */
+  round: number;
+  points: number;
+  /** True when the player was in the starting XI that round. */
+  initialLineUp: boolean;
+  /** `"st"` starter, `"bc"` bench. The second source for the same fact. */
+  state?: string;
+  isHomeTeam?: boolean;
+  /**
+   * Reported as 1 for every round of every player sampled, so it is a flag
+   * rather than minutes until a substitute appearance proves otherwise.
+   */
+  minutesPlayed?: number;
+}
+
+/** One daily valuation from `/1/player/summary`'s `prices[]`. */
+export interface PlayerPricePoint {
+  /** ISO instant Futmondo stamped the valuation with. */
+  date: string;
+  price: number;
+}
+
+/**
+ * `/1/player/summary` — far more than the clause price we used to take from it.
+ *
+ * One call already made sixty times per sync run, carrying a measured start
+ * record, daily value history reaching back before our first snapshot, the
+ * clause availability date, and Futmondo's own suggested clause.
+ */
 export interface PlayerSummary {
   playerId: string;
   slug?: string;
   clausePrice?: number;
-  /** True when the owner has blocked the clause. */
+  /**
+   * When the clause first becomes payable, ISO 8601. Read, never derived — see
+   * the header of src/lib/engine/clauses.ts.
+   */
+  clauseDate?: string;
+  /** Futmondo's own valuation of a fair clause. */
+  suggestedClause?: number;
+  /** True once the clause has been paid. */
+  clauseTransferred?: boolean;
+  /**
+   * True when the owner has blocked the clause.
+   *
+   * Never populated: no payload anywhere carries this field. Kept so the shape
+   * does not have to change if one ever appears, and so the absence is
+   * documented at the point of use. See OPEN-7.
+   */
   locked?: boolean;
+  /** Per-round record, oldest first. */
+  rounds: PlayerRoundRecord[];
+  /** Daily value history, oldest first. */
+  prices: PlayerPricePoint[];
+  /** Current owner's user team id, when the payload names one. */
+  ownerTeamId?: string;
+  /** When the current owner acquired them, exact to the millisecond. */
+  acquiredAt?: string;
   raw: Record<string, unknown>;
 }
 
@@ -270,17 +377,41 @@ export interface MatchOdds {
   raw: Record<string, unknown>;
 }
 
-/** `/1/championship/configuration` — the league's own settings. */
+/**
+ * `/1/championship/configuration` — the league's own settings.
+ *
+ * The real keys are flat and terse: `moneyPerPoint`, `moneyPerRanking`,
+ * `dspct`, `mnmp`, `enablingClause`. The parser used to look for `perPoint`
+ * inside a `bonus` object that does not exist, found nothing, and let the
+ * engine fall through to a hardcoded 60.000€ per point — in a league that pays
+ * zero. Everything below is read from a captured payload, not inferred.
+ */
 export interface ChampionshipConfiguration {
   budget?: number;
   initialPlayers?: number;
   maxUsers?: number;
-  /** Prize money per point scored. */
+  /** `moneyPerPoint`. Legitimately zero in leagues that pay by ranking only. */
   pointBonus?: number;
+  /** `moneyPerRanking`: the pool distributed by round ranking. */
+  rankingBonus?: number;
+  /** `rankingMode`, e.g. "flop". The payout shape behind it is not decoded. */
+  rankingMode?: string;
+  /** `usersToRank`. -1 observed; meaning not established. */
+  usersToRank?: number;
   allowCaptain?: boolean;
   allowMultiposition?: boolean;
+  /** `marketPlayers`: new machine listings per market refresh. */
   marketPlayers?: number;
+  /** `bidDuration`: how many days a listing lives. */
   bidDurationDays?: number;
+  /** `enablingClause`: days from acquisition before a clause can be paid. */
+  clauseWindowDays?: number;
+  /** `dspct`: share of value the machine pays for a direct sale. */
+  directSellShare?: number;
+  /** `mnmp`: floor on a listing price, as a share of value. */
+  minListingShare?: number;
   automaticClauses?: boolean;
+  /** True when clause blocking is enabled at all (`blc`). */
+  clauseBlockingEnabled?: boolean;
   raw: Record<string, unknown>;
 }

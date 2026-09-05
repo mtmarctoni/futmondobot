@@ -5,6 +5,8 @@ import {
   asArray,
   num,
   parseActiveChampionships,
+  parseAuctionSummary,
+  parseChampionshipConfiguration,
   parseChampionshipTeams,
   parseCurrentLineup,
   parseMarket,
@@ -763,5 +765,272 @@ describe("parseOdds", () => {
   it("still reads a flat shape, in case one is ever served", () => {
     const odds = parseOdds("m1", { odds: { home: 1.5, draw: 4, away: 6 } });
     expect(odds).toMatchObject({ home: 1.5, draw: 4, away: 6 });
+  });
+});
+
+/**
+ * Every fixture below is a captured payload, copied from a live call rather
+ * than written from what the code expects. That distinction is the whole point:
+ * this suite was green through six separate parser bugs because each fixture
+ * was invented from the same wrong assumption as the code it tested.
+ */
+describe("parseChampionshipConfiguration against the real payload", () => {
+  /** Verbatim from /1/championship/configuration for championship 6a95cf...73f. */
+  const CAPTURED = {
+    configuration: {
+      budget: 210000000,
+      numberOfPlayers: 15,
+      maxPlayersInRoster: 0,
+      moneyPerPoint: 0,
+      moneyPerRanking: 40000000,
+      rankingMode: "flop",
+      usersToRank: -1,
+      marketPlayers: 12,
+      marketTimes: 1,
+      bidDuration: 2,
+      enableAutomaticClauses: true,
+      enablingClause: 2,
+      playerRetention: 0,
+      playerMoveInDays: 0,
+      maxUserteams: 14,
+      members: 9,
+      blc: true,
+      rtv: "auto",
+      mnmp: 0.5,
+      dspct: 0.8,
+      mcpw: -1,
+      rcp: -1,
+      mdbp: true,
+      mbp: 3,
+      vmb: 3,
+      mtoffset: "-120",
+      mtrange: "9-20",
+      ctt: false,
+      ccr: 1,
+      marketStart: "2026-08-30T22:00:00.000Z",
+      fullSeason: true,
+    },
+  };
+
+  it("reads a genuinely zero points bonus rather than falling through", () => {
+    // The bug: the parser looked for `perPoint` inside a `bonus` object that
+    // does not exist, so this came back undefined and the engine substituted a
+    // hardcoded 60.000€ per point. Every prize-money figure in the app was
+    // fiction. Zero has to survive as zero.
+    const config = parseChampionshipConfiguration(CAPTURED);
+    expect(config.pointBonus).toBe(0);
+  });
+
+  it("reads the ranking pool, which is where the money actually comes from", () => {
+    const config = parseChampionshipConfiguration(CAPTURED);
+    expect(config.rankingBonus).toBe(40_000_000);
+    expect(config.rankingMode).toBe("flop");
+  });
+
+  it("reads the market rules the bidding and clause logic depend on", () => {
+    const config = parseChampionshipConfiguration(CAPTURED);
+    expect(config.budget).toBe(210_000_000);
+    expect(config.initialPlayers).toBe(15);
+    expect(config.marketPlayers).toBe(12);
+    expect(config.bidDurationDays).toBe(2);
+    expect(config.clauseWindowDays).toBe(2);
+    expect(config.directSellShare).toBe(0.8);
+    expect(config.minListingShare).toBe(0.5);
+    expect(config.automaticClauses).toBe(true);
+    expect(config.clauseBlockingEnabled).toBe(true);
+  });
+
+  it("accepts the same keys at the top level, without the wrapper", () => {
+    const config = parseChampionshipConfiguration(CAPTURED.configuration);
+    expect(config.pointBonus).toBe(0);
+    expect(config.directSellShare).toBe(0.8);
+  });
+});
+
+describe("parseMarket bid counts", () => {
+  it("reads numberOfBids, which is the key the payload actually uses", () => {
+    // The parser looked for `bids`/`numBids`/`offers`, so this was permanently
+    // undefined for every listing ever parsed.
+    const [player] = parseMarket([
+      {
+        id: "p1",
+        name: "Pedri",
+        role: "MED",
+        value: 30000000,
+        price: 30000000,
+        numberOfBids: 20,
+      },
+    ]);
+    expect(player.numberOfBids).toBe(20);
+  });
+
+  it('maps the hidden "-" to null rather than swallowing it', () => {
+    // "-" is a string, and a strict numeric conversion turns it into undefined,
+    // which is indistinguishable from "no bids". They are different facts.
+    const [player] = parseMarket([
+      {
+        id: "p1",
+        name: "Pedri",
+        role: "MED",
+        value: 30000000,
+        price: 30000000,
+        numberOfBids: "-",
+      },
+    ]);
+    expect(player.numberOfBids).toBeNull();
+  });
+
+  it("reads the standing bids on our own listing, as /1/market/myplayers sends", () => {
+    // Captured from /1/market/myplayers. The bidder's team is blanked: bids are
+    // sealed as to identity but not as to price.
+    const [listing] = parseMarket([
+      {
+        id: "63a8cd87bfb65a271f11db10",
+        name: "Carlos Álvarez",
+        role: "MED",
+        value: 18931044,
+        price: 18931044,
+        expirationDate: "2026-09-04T18:17:09.885Z",
+        bids: [
+          {
+            id: "6a98f597b4d723070d417621",
+            price: 18204532,
+            userTeam: { name: "", slug: "" },
+          },
+        ],
+      },
+    ]);
+
+    expect(listing.bids).toHaveLength(1);
+    expect(listing.bids?.[0].price).toBe(18_204_532);
+    expect(listing.bids?.[0].bidderTeamName).toBeUndefined();
+    expect(listing.expiresAt).toBe("2026-09-04T18:17:09.885Z");
+  });
+});
+
+describe("parseAuctionSummary", () => {
+  it("reads the minimum bid step, which is what a considered bid needs", () => {
+    const summary = parseAuctionSummary("p1", {
+      numberOfBids: 20,
+      marketPlayer: {},
+      increment: 250000,
+    });
+    expect(summary?.increment).toBe(250_000);
+    expect(summary?.numberOfBids).toBe(20);
+  });
+
+  it("returns null rather than throwing on an unrecognised answer", () => {
+    expect(parseAuctionSummary("p1", "nope")).toBeNull();
+  });
+});
+
+describe("parsePlayerSummary against the real payload", () => {
+  /** Trimmed from a live /1/player/summary response, keys and values verbatim. */
+  const CAPTURED = {
+    data: {
+      slug: "19302146",
+      rating: 2,
+      total: { points: 12.2, played: 3 },
+    },
+    points: [
+      { round: 1, points: 4.1, isHomeTeam: true, minutesPlayed: 1, initialLineUp: true, st: "st" },
+      { round: 2, points: 3.9, isHomeTeam: false, minutesPlayed: 1, initialLineUp: true, st: "st" },
+      { round: 3, points: 4.2, isHomeTeam: true, minutesPlayed: 1, initialLineUp: false, st: "bc" },
+    ],
+    prices: [
+      { date: "2026-08-29T02:25:30.285Z", price: 2590865, c: 1000000, s: 500871 },
+      { date: "2026-08-30T02:25:30.285Z", price: 2620000, c: 1000000, s: 500871 },
+    ],
+    owners: [{ n: "Ted Lasso's Playbook", p: 0, d: "2026-09-02T18:05:10.923Z" }],
+    championship: {
+      clause: {
+        price: 9627619,
+        date: "2026-09-07T18:05:10.923Z",
+        transferred: false,
+        suggestedClause: 5000341,
+      },
+      owner: { _id: "6a98655603bfa804dd19cb52" },
+    },
+  };
+
+  it("reads the clause window, which decides whether any clause advice applies", () => {
+    const summary = parsePlayerSummary("p1", CAPTURED);
+    expect(summary?.clausePrice).toBe(9_627_619);
+    expect(summary?.clauseDate).toBe("2026-09-07T18:05:10.923Z");
+    expect(summary?.suggestedClause).toBe(5_000_341);
+    expect(summary?.clauseTransferred).toBe(false);
+  });
+
+  it("has no lock state to read, because no payload carries one", () => {
+    // Asserted rather than assumed. The clause object is exactly
+    // {price, date, transferred, suggestedClause}; if a `locked` field ever
+    // appears this test is where it will be noticed.
+    const summary = parsePlayerSummary("p1", CAPTURED);
+    expect(summary?.locked).toBeUndefined();
+  });
+
+  it("reads the measured start record from points[]", () => {
+    const summary = parsePlayerSummary("p1", CAPTURED);
+    expect(summary?.rounds.map((r) => r.initialLineUp)).toEqual([true, true, false]);
+    expect(summary?.rounds[2].state).toBe("bc");
+    expect(summary?.rounds[0].points).toBe(4.1);
+  });
+
+  it("falls back to st when initialLineUp is absent", () => {
+    const summary = parsePlayerSummary("p1", {
+      points: [{ round: 1, points: 4, st: "st" }],
+    });
+    expect(summary?.rounds[0].initialLineUp).toBe(true);
+  });
+
+  it("reads value history but not the fields whose meaning is unknown", () => {
+    const summary = parsePlayerSummary("p1", CAPTURED);
+    expect(summary?.prices).toEqual([
+      { date: "2026-08-29T02:25:30.285Z", price: 2_590_865 },
+      { date: "2026-08-30T02:25:30.285Z", price: 2_620_000 },
+    ]);
+  });
+
+  it("reads when the current owner acquired them", () => {
+    const summary = parsePlayerSummary("p1", CAPTURED);
+    expect(summary?.acquiredAt).toBe("2026-09-02T18:05:10.923Z");
+    expect(summary?.ownerTeamId).toBe("6a98655603bfa804dd19cb52");
+  });
+
+  it("stays total on a payload with none of it", () => {
+    const summary = parsePlayerSummary("p1", { data: { slug: "abc" } });
+    expect(summary?.rounds).toEqual([]);
+    expect(summary?.prices).toEqual([]);
+    expect(summary?.clauseDate).toBeUndefined();
+  });
+});
+
+describe("player status", () => {
+  it("is parsed off the roster row, where it costs no extra call", () => {
+    const [player] = parseRoster([
+      {
+        id: "p1",
+        name: "Vargas",
+        role: "delantero",
+        value: 17341658,
+        points: 0,
+        status: "doubt",
+      },
+    ]);
+    expect(player.status).toBe("doubt");
+  });
+
+  it("is parsed off a market listing, which the club endpoint never reaches", () => {
+    const [player] = parseMarket([
+      {
+        id: "p2",
+        name: "Odriozola",
+        role: "defensa",
+        value: 1000000,
+        price: 1000000,
+        status: "injured",
+      },
+    ]);
+    expect(player.status).toBe("injured");
   });
 });
