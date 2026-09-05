@@ -118,16 +118,56 @@ but market endpoints take `player_id` and `player_slug` in snake_case.
 | Endpoint | Query | Returns |
 |---|---|---|
 | `/2/user/activechampionships` | `{excludeGeneral}` | Your championships and your team in each. **Use this, not `/2/league/list`** |
-| `/1/championship/configuration` | `{championshipId}` | Budget, primas, market rules — the whole settings table |
+| `/1/championship/configuration` | `{championshipId}` | Budget, primas, market rules — the whole settings table. **Flat, terse keys; see the decode table below** |
 | `/1/championship/information` | `{championshipId}` | Championship metadata |
 | `/1/user/information` | `{}` | Account info |
 | `/5/strategy/availables` | `{championshipId}` | Legal formations for this championship |
+
+#### The configuration payload, decoded
+
+The keys are flat and terse, and there is **no `bonus` or `awards` wrapper**.
+The same values appear twice: at the top level and again under
+`configuration`, with identical content. Captured verbatim from championship
+`6a95cfc4ce50f2235a55f73f`:
+
+```json
+{
+  "budget": 210000000, "numberOfPlayers": 15, "maxPlayersInRoster": 0,
+  "moneyPerPoint": 0, "moneyPerRanking": 40000000,
+  "rankingMode": "flop", "usersToRank": -1,
+  "marketPlayers": 12, "marketTimes": 1, "bidDuration": 2,
+  "enableAutomaticClauses": true, "enablingClause": 2,
+  "playerRetention": 0, "playerMoveInDays": 0,
+  "maxUserteams": 14, "members": 9, "blc": true, "rtv": "auto",
+  "mnmp": 0.5, "dspct": 0.8, "mcpw": -1, "rcp": -1,
+  "mdbp": true, "mbp": 3, "vmb": 3,
+  "mtoffset": "-120", "mtrange": "9-20", "ctt": false, "ccr": 1,
+  "marketStart": "2026-08-30T22:00:00.000Z", "fullSeason": true
+}
+```
+
+| Field | Meaning | Consequence |
+|---|---|---|
+| `moneyPerPoint` | Prize money per point | **Zero here.** The parser used to look for `perPoint` inside a `bonus` object that does not exist, found nothing, and let the engine fall back to a hardcoded 60.000€ — so every prize-money figure the app printed was invented |
+| `moneyPerRanking` | Pool distributed by round ranking | 40M. Where all prize money in this league actually comes from |
+| `rankingMode` | How that pool is split | `"flop"`. **Payout shape not decoded** — do not convert points to money on the strength of it |
+| `numberOfPlayers` | Squad size | 15 |
+| `maxPlayersInRoster` | Squad cap, 0 for none | Buying never needs a sale first |
+| `bidDuration` | Days a listing lives | 2, so ~24 machine listings are live at once |
+| `enablingClause` | Days before a clause can be paid | 2 — but **do not derive `clause.date` from it**, see below |
+| `dspct` | Direct-sell share of value | 0.8. A guaranteed floor under any sale |
+| `mnmp` | Minimum listing price, as a share of value | 0.5 |
+| `blc` | Clause blocking enabled | The lock automation is legal here |
+
+Not decoded, and nothing should be built on them until observed: `usersToRank`,
+`mbp`/`vmb` (both 3 — possibly a cap on simultaneous bids), `ccr`, `mcpw`,
+`rcp`, `rtv`, `mtrange`, `mtoffset`.
 
 ### Squad, lineup and points
 
 | Endpoint | Query | Returns |
 |---|---|---|
-| `/1/userteam/information` | `{championshipId, userteamId, type}` | **Funds, team value, max bid.** Source of truth for money |
+| `/1/userteam/information` | `{championshipId, userteamId, type}` | **Funds (`budget`), `withheld`, `teamValue`, `maxBid`.** Source of truth for money. `withheld` is the cash held by standing bids and is what stops the allocator spending the same euro twice |
 | `/1/userteam/roster` | `{championshipId, userteamId}` | `answer[]` of `{id, name, role, team, teamId, value, buyPrice, average{}, clause{}, market}` — see the row shape below |
 | `/1/userteam/lineup` | `{championshipId, userteamId}` | Current XI, bench and strategy string (e.g. `"4-3-3"`) |
 | `/1/userteam/rounds` | `{championshipId, userteamId}` | `answer[]` of `{id, number, status}`, status ∈ `closed`/`running`/`open` |
@@ -166,6 +206,34 @@ as flat values fails silently:
   who moved to Club América: still on the championship roster, still valued at
   18.5M, still clause-priced, and permanently unable to score. Nothing in the
   payload flags it — see "a departed player looks completely normal" below.
+- **`clause` has no `locked` field.** It is exactly
+  `{price, date, transferred, suggestedClause}`, here and in
+  `/1/player/summary`. Nothing anywhere reports whether a clause is blocked, so
+  the engine cannot observe the effect of its own `lockplayer` write and has to
+  treat its own `action_log` as the record. See OPEN-7.
+
+#### `status` — the availability marker nobody was reading
+
+Present on every roster and market row. Observed values and counts across all
+nine rosters of this league:
+
+| Value | Count | Meaning |
+|---|---|---|
+| `""` | 110 | Nothing to report |
+| `"ok"` | 16 | **A positive marker** — returning to fitness, *not* an absence |
+| `"doubt"` | 10 | Fitness doubt. Most of these start anyway |
+| `"injured"` | 2 | Out |
+| `"injured2"` | 3 | Out |
+| `"redcard"` | 1 | Out |
+
+Two things follow. `"ok"` must never be read as unavailable, or the players who
+have just recovered are exactly the ones benched. And `doubt` is not `injured`:
+grading them alike forced three of a fifteen-player squad to zero and left ten
+fit outfield players for eleven shirts.
+
+It is also the only availability signal that reaches **market listings**, which
+`/2/team/unavailableplayers` never covers — Odriozola was listed with
+`status: "injured"` and nothing else would have said so.
 
 ### Writing a lineup
 
@@ -186,7 +254,7 @@ Related: `/2/userteam/changestrategy`, `/2/userteam/changeplayer`,
 | Endpoint | Query | Notes |
 |---|---|---|
 | `/1/market/players` | `{championshipId, userteamId, type: "market"}` | Today's market. `type` is required |
-| `/1/market/myplayers` | `{championshipId, userteamId, type}` | Your listings |
+| `/1/market/myplayers` | `{championshipId, userteamId, type: "market"}` | **Your listings, with the standing bids on them.** Not the same as `/1/market/players` |
 | `/1/market/bid` | `{championshipId, userteamId, player_id, player_slug, price, isClause}` | New bid |
 | `/5/market/modifybid` | `{championshipId, userteamId, player_id, price, bid, rounds: []}` | Change a bid — takes `bid` id, no slug |
 | `/1/market/cancelbid` | `{championshipId, bid}` | |
@@ -197,7 +265,53 @@ Related: `/2/userteam/changestrategy`, `/2/userteam/changeplayer`,
 | `/1/market/rosterbid` | `{championshipId, player_slug, price}` | Bid on a *rival's* player |
 | `/1/market/rosterbids` | `{championshipId, type}` | Incoming/outgoing roster bids |
 | `/1/market/acceptrosterbid` / `rejectrosterbid` / `cancelrosterbid` | `{championshipId, bid}` | |
-| `/1/market/playerauctionsummary` | `{championshipId, player_id}` | Auction detail |
+| `/1/market/playerauctionsummary` | `{championshipId, userteamId, player_id}` | **`increment`: the minimum bid step.** Rejects a slug; errors `market.playerAuctionSummary.needTeamId` without the team |
+
+#### `/1/market/myplayers` — our own listings and their bids
+
+```json
+[ { "id": "63a8cd87bfb65a271f11db10", "name": "Carlos Álvarez",
+    "price": 18931044, "expirationDate": "2026-09-04T18:17:09.885Z",
+    "bids": [ { "id": "6a98f597b4d723070d417621", "price": 18204532,
+                "userTeam": { "name": "", "slug": "" } } ] } ]
+```
+
+The bidder's team is **blanked for a market bid** — sealed as to identity but
+not as to price. A rival's *direct roster bid* on the same listing comes back
+with their team name in full, so the absence of a name is a fact about the kind
+of bid rather than a property of the endpoint. One captured listing carried
+both at once:
+
+```json
+"bids": [ { "price": 8188435 },
+          { "price": 8971705, "userTeam": { "name": "Theo Obrador" } } ]
+```
+
+This is the only way to see an offer standing against one of our own listings,
+and without it the engine recommended selling players who were already listed.
+Note also that a bid can exceed the asking price (Adrián Niño: 1.00M asked,
+1.06M offered), so "top bid versus ask" has to handle both directions.
+
+#### `numberOfBids` is a string, and sometimes `"-"`
+
+The bid count on a market row is `numberOfBids` — not `bids`, `numBids` or
+`offers`, which is what the parser looked for, so the value was permanently
+undefined. When Futmondo hides it the value is the **string** `"-"`, which a
+strict numeric conversion silently turns into "no answer"; the two are
+different facts and are kept apart.
+
+**Do not make decisions on the number itself** until it is understood: it came
+back as 20 for a 1M injured defender in a nine-member league. See OPEN-3.
+
+#### `/1/market/playerauctionsummary`
+
+```json
+{ "numberOfBids": 20, "marketPlayer": { … }, "increment": 250000 }
+```
+
+`increment` is the minimum bid step and is the direct answer to "how much
+should I bid" — an off-step offer may be rejected outright. It may scale with
+value, so it is read per candidate rather than assumed.
 
 ### Clauses
 
@@ -215,22 +329,65 @@ Clause price for a *rival's* player is not in any bulk payload, so finding
 steal targets means fanning out `/1/player/summary` per player — throttle it.
 Your own squad's clause prices come free on the roster row (`clause.price`).
 
-`/1/player/summary` carries considerably more than the clause, and this is not
-yet all used:
+`/1/player/summary` carries considerably more than the clause. One call, made
+once per player per sync run, returns all of the following:
 
-- **`answer.points[]` is the per-round record `/1/userteam/roundlineup` refuses
-  to give**: `{round, points, isHomeTeam, minutesPlayed, initialLineUp, st}`
-  where `st` is `"st"` for a start and `"bc"` for a bench appearance. This is a
-  measured start rate rather than the "rounds appeared in" estimate the model
-  currently uses. `minutesPlayed` appears to be a flag rather than a count in
-  this league — verify before trusting it as minutes.
-- **`answer.prices[]` is the value history**, per day, from before our first
-  snapshot: `{date, price, c, s}`.
-- **`answer.owners[]` is the ownership chain** with the price and date of each
-  transfer, `"futmondo"` naming the machine.
-- **`answer.championship.clause.date`** is in the future for a recently bought
-  player, alongside `unlockDate` — a grace period during which the clause
-  cannot be paid, which the clause-defence model does not yet account for.
+```json
+{
+  "data":   { "…player…", "rating": 2, "total": { "points": 12.2, "played": 3 } },
+  "points": [ { "round": 1, "points": 4.1, "isHomeTeam": true,
+                "minutesPlayed": 1, "initialLineUp": true, "st": "st" }, … ],
+  "prices": [ { "date": "2026-08-29T02:25:30.285Z", "price": 2590865,
+                "c": 1000000, "s": 500871 }, … ],
+  "owners": [ { "n": "Ted Lasso's Playbook", "p": 0, "d": "2026-09-02T18:05:10.923Z" } ],
+  "championship": { "clause": { "price": 9627619, "date": "2026-09-07T18:05:10.923Z",
+                                "transferred": false, "suggestedClause": 5000341 },
+                    "owner": { … } },
+  "bids": …, "market": …,
+  "match": { "r": { "number": 4 }, "info": { "date": "2026-09-05T19:00:00.000Z" }, … }
+}
+```
+
+- **`points[]` is the per-round record `/1/userteam/roundlineup` refuses to
+  give**: `{round, points, isHomeTeam, minutesPlayed, initialLineUp, st}` where
+  `st` is `"st"` for a start and `"bc"` for a bench appearance. A *measured*
+  start rate, rather than the "rounds appeared in" estimate — and start
+  probability is the largest term in every projection. Note that `round` is a
+  matchday **number**, not a round id, so it has to be resolved against the
+  stored calendar; a number matching more than one stored round is skipped
+  rather than guessed at.
+  `minutesPlayed` was `1` for every round of every player sampled: treat it as
+  a flag, not as minutes, until a substitute appearance proves otherwise.
+- **`prices[]` is the daily value history**, reaching back to 2026-08-29 —
+  before our first snapshot. This is the **one exception to "history cannot be
+  backfilled"**: that rule holds for points and ownership, but the whole value
+  series is republished on every call, so a day the sync missed is recoverable
+  for value alone. Backfilled rows are marked, and a live capture always wins.
+  `c` and `s` are **not decoded and not stored**; see OPEN-8.
+- **`owners[]` is the ownership chain**; `owners[].d` is the acquisition
+  instant, exact to the millisecond, and `"futmondo"` names the machine.
+- **`championship.clause.suggestedClause`** is Futmondo's own valuation of a
+  fair clause — roughly half what owners actually set (Ximo Navarro: 9.63M
+  actual against 5.00M suggested). A free prior in both directions.
+- **`data.rating`** (integer, 2 for the player sampled) is unread and
+  unexplained. See OPEN-8.
+
+#### `clause.date` — read it, never derive it
+
+`clause.date` is the instant the clause first becomes payable, and it is in the
+future far more often than not. Ignoring it produced 55 "take this clause" and
+15 "block this now" recommendations on a day when **no clause in the league
+could be paid by anybody**.
+
+Two different formulas are visible in the same league on the same day:
+
+- Drafted players: acquisition instant **+ 5 days, to the millisecond**
+  (`owners[].d` 2026-09-02T18:05:10.923Z → clause 2026-09-07T18:05:10.923Z).
+- Players bought in the market: **end of local day + 2**
+  (`2026-09-06T21:59:59.999Z`), which matches `enablingClause: 2`.
+
+Do not reconcile those into a rule. Gate on the field itself, which needs no
+formula, and see OPEN-1.
 
 ### Rivals and standings
 

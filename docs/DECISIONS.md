@@ -334,3 +334,142 @@ and one fewer build step.
 **Consequences.** The `UNNEST` casts cannot be type-checked, which is exactly
 why `scripts/db-smoke.ts` exists. It has already earned its place by catching
 two date bugs unit tests all passed.
+
+---
+
+## 21. Grade availability, do not treat it as a boolean
+
+**Decision.** `src/lib/engine/availability.ts` maps every Futmondo absence
+reason to one of `out` / `doubt` / `fit` and a multiplier applied to whatever
+start probability the player would otherwise have had. `out` is zero, `doubt` is
+0.45, and **anything unrecognised is `doubt`**.
+
+**Reasoning.** `doubt` and `injured` arrive in the same field and do not mean the
+same thing: most doubtful players start. Zeroing both forced three of a
+fifteen-player squad out of contention, left ten fit outfield players for eleven
+shirts so no formation could be filled, and produced advice to sell a fit 17M
+forward as "dead capital". A multiplier also expresses something a boolean
+cannot — a doubtful player who starts 90% of the time is a better bet than a fit
+player who starts 30% of the time.
+
+**Consequences.** 0.45 is a guess and is named as one. It wants the measured
+share of `doubt` players who actually started, which only became collectable
+with the start record from `/1/player/summary`. The unrecognised-reason rule is
+the load-bearing half: a new Futmondo wording must never be able to empty a
+position silently.
+
+---
+
+## 22. A rule's zero must be distinguishable from its absence
+
+**Decision.** `DEFAULT_RULES.pricePerPoint` is 0, not 60.000, and every consumer
+tests `paysForPoints(rules)` before printing a money sentence rather than
+printing "0€".
+
+**Reasoning.** The configuration parser read a key that does not exist, so
+`pointBonus` was undefined and `config.pointBonus ?? DEFAULT.pricePerPoint`
+substituted an invented rate. Every "worth about 84k a round in prize money"
+line the app ever printed was fiction, and it read as authoritative because the
+arithmetic was right. This league's `moneyPerPoint` is genuinely 0.
+
+**Consequences.** Decisions rank on expected points and say nothing about money
+until `rankingMode: "flop"` is understood well enough to convert a ranking
+payout into a per-point rate. That is a real loss of expressiveness, and it is
+better than a confident wrong number.
+
+---
+
+## 23. Gate clause advice on the clause date, and never derive it
+
+**Decision.** `clause.date` is stored on the snapshot and read directly. A
+clause dated in the future produces no steal and no exposure, in either
+direction, and the report says when the window opens instead.
+
+**Reasoning.** Two different formulas are visible in the same league on the same
+day — acquisition + 5 days to the millisecond for drafted players,
+end-of-local-day + 2 for bought ones — so any rule reconciling them would be a
+guess. Rule 3 forbids guessing a write payload; the same caution applies to a
+rule deciding whether to spend five million euros.
+
+**Consequences.** Steal and block advice goes quiet for the first days after a
+draft. That is correct: nothing was takeable. The window note keeps it from
+reading as "nothing to plan".
+
+---
+
+## 24. Treat our own audit log as the record of a clause block
+
+**Decision.** `runClauses` reads successful `lock` rows from `action_log` and
+treats those players as blocked.
+
+**Reasoning.** No Futmondo payload carries lock state — the clause object is
+exactly `{price, date, transferred, suggestedClause}` everywhere it appears. So
+the engine cannot observe the effect of its own write, `alreadyLocked` was
+permanently false, and with a cap of five the same top five targets would have
+been re-locked every day forever while the other ten were never reached.
+
+**Consequences.** This can be wrong in the dangerous direction: a rival's clause
+payment or an admin recalculation clears a block with no trace here, and we
+would believe a player is protected who is not. It is bounded to recent history
+for that reason, and every automated block is now stated in the Telegram report
+so the action is at least visible. If lock state ever becomes readable, that
+reading should replace this outright.
+
+---
+
+## 25. Rank buys by absolute upgrade while cash is abundant
+
+**Decision.** `runMarket` ranks affordable candidates by absolute expected-points
+upgrade, and falls back to points per million only when the best candidate on
+the market is out of reach.
+
+**Reasoning.** Efficiency is the right objective when funds bind. It is the wrong
+one when they do not: with 202M idle in a 210M budget and no yield whatsoever on
+cash, ranking by points per million put a 1.0M defender at the top of the list
+and left the money doing nothing. Cash exists here only to be converted into
+points.
+
+**Consequences.** The regime is decided from the candidates in front of us
+rather than a fixed threshold, computed once over the list so the comparator
+stays a total order.
+
+---
+
+## 26. Bid above the asking price, in the auction's own increment
+
+**Decision.** Every buy carries a ceiling (what the player is worth to us) and a
+bid (the asking price plus whole `increment` steps inside that ceiling), both
+shown. The increment is read per listing from
+`/1/market/playerauctionsummary`.
+
+**Reasoning.** The asking price is the auction's floor, so bidding it loses every
+contested listing by construction — the single bid ever placed through this app
+was an asking price. An off-step bid may be rejected outright, so the step has
+to be the real one rather than an assumed constant.
+
+**Consequences.** The markup between ask and ceiling is a stated placeholder.
+The honest input is a clearing-price model fitted to what listings actually sold
+for, and 21 rows in `transfers` is not a model. Both numbers are shown so the
+two-tap confirmation is an informed decision rather than a number to trust —
+and nothing about bidding is automated.
+
+---
+
+## 27. Keep both crons, and accept a ten-hour lead on market close
+
+**Decision.** Market listings expire around 03:50Z; the decision cron stays at
+18:00Z and the pre-close work is folded into it. No third cron, no external
+trigger, for now.
+
+**Reasoning.** Vercel Hobby allows two cron jobs at once a day and both are
+used. The alternatives were an external GitHub Actions trigger against the
+already-`CRON_SECRET`-protected route, or Vercel Pro. Neither is worth taking on
+yet, because **bids are sealed**: `numberOfBids` is `"-"` in the market list and
+the bidder is blanked on our own listings, so a bid placed ten hours before
+close has almost the same information as one placed at close.
+
+**Consequences.** The result of a bid is learned about two hours after
+resolution rather than at it. Revisit if `numberOfBids` turns out to carry real
+information (OPEN-3), which would make bidding late genuinely better than
+bidding early. Whichever option is chosen, it must not put the 06:00Z data sync
+at risk: a day that job does not run is a day of history lost permanently.
