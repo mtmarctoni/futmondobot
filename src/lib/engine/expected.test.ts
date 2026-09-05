@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { PlayerForm, ValueTrend } from "../db/repo";
 import type { PlayerStats } from "../futmondo/types";
+import { classify, classifyAll, DOUBT_MULTIPLIER } from "./availability";
 import {
   appearances,
   evaluate,
@@ -110,7 +111,7 @@ describe("startProbability", () => {
       scraped: 0.9,
       startRate: 1,
       rounds: 10,
-      unavailable: true,
+      availabilityMultiplier: 0,
     });
     expect(result.probability).toBe(0);
     expect(result.basis).toMatch(/injured or suspended/);
@@ -121,7 +122,7 @@ describe("startProbability", () => {
       scraped: 0.3,
       startRate: 1,
       rounds: 10,
-      unavailable: false,
+      availabilityMultiplier: 1,
     });
     expect(result.probability).toBeCloseTo(0.3, 10);
     expect(result.basis).toMatch(/probable XI 30%/);
@@ -132,7 +133,7 @@ describe("startProbability", () => {
       scraped: undefined,
       startRate: 1,
       rounds: 2,
-      unavailable: false,
+      availabilityMultiplier: 1,
     });
     // Two starts from two is suggestive, not certain.
     expect(result.probability).toBeGreaterThan(0.5);
@@ -145,7 +146,7 @@ describe("startProbability", () => {
       scraped: undefined,
       startRate: null,
       rounds: 0,
-      unavailable: false,
+      availabilityMultiplier: 1,
     });
     expect(result.probability).toBe(0.5);
     expect(result.basis).toMatch(/no appearances yet/);
@@ -173,7 +174,7 @@ describe("evaluate", () => {
       BASE,
       context({
         form: new Map([["p1", form()]]),
-        unavailable: new Map([["p1", "injured"]]),
+        unavailable: classifyAll(new Map([["p1", "injured"]])),
       }),
     );
     expect(player.expectedPoints).toBe(0);
@@ -353,7 +354,7 @@ describe("evaluate with a live scoring record", () => {
   it("still zeroes an injured player however well they were scoring", () => {
     const player = evaluate(
       { ...BASE, stats: stats({ average: 12, matches: 5, fitness: [12, 12, 12, 12, 12] }) },
-      context({ unavailable: new Map([["p1", "injured"]]) }),
+      context({ unavailable: classifyAll(new Map([["p1", "injured"]])) }),
     );
     expect(player.expectedPoints).toBe(0);
   });
@@ -383,5 +384,110 @@ describe("evaluate with a live scoring record", () => {
     );
     expect(player.notes.join(" ")).toMatch(/hard away at Barcelona/);
     expect(player.nextOpponent).toBe("Barcelona");
+  });
+});
+
+/**
+ * The bug that cost points: three of a fifteen-player squad were flagged
+ * `doubt`, all three were forced to zero, and the XI could not be filled.
+ */
+describe("graded availability", () => {
+  it("keeps a fraction of the projection for a doubt", () => {
+    const fit = evaluate(
+      { ...BASE, stats: stats({ average: 6, matches: 3, fitness: [6, 6, 6] }) },
+      context({ startProbabilities: new Map([["p1", 1]]) }),
+    );
+    const doubtful = evaluate(
+      { ...BASE, stats: stats({ average: 6, matches: 3, fitness: [6, 6, 6] }) },
+      context({
+        startProbabilities: new Map([["p1", 1]]),
+        unavailable: classifyAll(new Map([["p1", "doubt"]])),
+      }),
+    );
+
+    expect(doubtful.expectedPoints).toBeGreaterThan(0);
+    expect(doubtful.expectedPoints).toBeCloseTo(
+      fit.expectedPoints * DOUBT_MULTIPLIER,
+      6,
+    );
+    expect(doubtful.availability).toBe("doubt");
+  });
+
+  it("still zeroes an out player", () => {
+    const player = evaluate(
+      { ...BASE, stats: stats() },
+      context({ unavailable: classifyAll(new Map([["p1", "injured2"]])) }),
+    );
+    expect(player.expectedPoints).toBe(0);
+    expect(player.availability).toBe("out");
+  });
+
+  it("degrades rather than deletes a player for a reason it does not know", () => {
+    // A new Futmondo wording must never be able to empty a position silently.
+    const player = evaluate(
+      { ...BASE, stats: stats() },
+      context({ unavailable: classifyAll(new Map([["p1", "concentracion"]])) }),
+    );
+    expect(player.availability).toBe("doubt");
+    expect(player.expectedPoints).toBeGreaterThan(0);
+  });
+
+  it("reads 'ok' as fit, because it marks a return rather than an absence", () => {
+    expect(classify("ok")).toBeNull();
+    expect(classify("")).toBeNull();
+    expect(classify(null)).toBeNull();
+  });
+
+  it("treats a departure as certain", () => {
+    const graded = classify("no longer in the competition (now at América)");
+    expect(graded?.severity).toBe("out");
+    expect(graded?.multiplier).toBe(0);
+  });
+
+  it("keeps a doubt's reasoning visible alongside the discount", () => {
+    const player = evaluate(
+      { ...BASE, stats: stats() },
+      context({ unavailable: classifyAll(new Map([["p1", "doubt"]])) }),
+    );
+    expect(player.notes).toContain("doubtful");
+    expect(player.notes.join(" ")).toMatch(/discounted for a fitness doubt/);
+  });
+});
+
+describe("startProbability with a measured start record", () => {
+  it("prefers a measured start rate over an appearance share", () => {
+    // Same appearances, opposite start records: a player who comes off the
+    // bench every week is not the player who starts every week.
+    const starter = startProbability({
+      scraped: undefined,
+      measuredStartRate: 1,
+      measuredRounds: 4,
+      startRate: 0.5,
+      rounds: 4,
+      availabilityMultiplier: 1,
+    });
+    const substitute = startProbability({
+      scraped: undefined,
+      measuredStartRate: 0,
+      measuredRounds: 4,
+      startRate: 0.5,
+      rounds: 4,
+      availabilityMultiplier: 1,
+    });
+
+    expect(starter.probability).toBeGreaterThan(substitute.probability);
+    expect(starter.basis).toMatch(/started 100% of 4 rounds/);
+  });
+
+  it("still lets a scraped probable XI win", () => {
+    const result = startProbability({
+      scraped: 0.2,
+      measuredStartRate: 1,
+      measuredRounds: 10,
+      startRate: 1,
+      rounds: 10,
+      availabilityMultiplier: 1,
+    });
+    expect(result.probability).toBeCloseTo(0.2, 10);
   });
 });

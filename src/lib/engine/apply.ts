@@ -247,13 +247,30 @@ function planMoves(current: CurrentLineup, pick: LineupPick): PlannedMove[] {
 
 export interface LockResult {
   locked: { playerId: string; name: string; reason: string }[];
+  /** Targets skipped because the cap was reached, so the report can say so. */
+  skipped: number;
   errors: string[];
 }
+
+/**
+ * How many clauses to block in one run.
+ *
+ * Was five, which was a real bug rather than a conservative default: with no
+ * readable lock state the same top five targets were re-locked every day and
+ * the other ten were never reached at all. A squad is fifteen players, so the
+ * cap now covers one, and it exists only to bound a runaway loop.
+ */
+const MAX_LOCKS_PER_RUN = 20;
 
 /**
  * Blocks clauses on the players most worth protecting. Free, reversible, and
  * unlimited in this league, so the only judgement is which players are
  * genuinely exposed.
+ *
+ * Note what this cannot do: verify its own work. No payload anywhere carries a
+ * `locked` field, so a successful write here is the only evidence a block
+ * exists, and `action_log` is where that evidence lives. `runClauses` reads it
+ * back through `lockedPlayerIds`. See OPEN-7.
  */
 export async function applyLocks(args: {
   client: FutmondoClient;
@@ -262,12 +279,12 @@ export async function applyLocks(args: {
   max?: number;
   dryRun?: boolean;
 }): Promise<LockResult> {
-  const { client, scope, exposed, max = 5, dryRun = false } = args;
-  const result: LockResult = { locked: [], errors: [] };
+  const { client, scope, exposed, max = MAX_LOCKS_PER_RUN, dryRun = false } = args;
+  const result: LockResult = { locked: [], skipped: 0, errors: [] };
 
-  const targets = exposed
-    .filter((e) => !e.alreadyLocked && e.threats.length > 0)
-    .slice(0, max);
+  const eligible = exposed.filter((e) => !e.alreadyLocked && e.threats.length > 0);
+  const targets = eligible.slice(0, max);
+  result.skipped = eligible.length - targets.length;
 
   for (const target of targets) {
     if (dryRun) {

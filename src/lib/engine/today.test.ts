@@ -30,6 +30,7 @@ function evaluated(over: Partial<Evaluated> = {}): Evaluated {
     fixtureDifficulty: 0.5,
     nextOpponent: null,
     unavailableReason: null,
+    availability: "fit",
     valueDelta: 0,
     sampleRounds: 0,
     expectedPoints: 2,
@@ -37,6 +38,10 @@ function evaluated(over: Partial<Evaluated> = {}): Evaluated {
     ownerTeamId: "me",
     clausePrice: null,
     clauseLocked: null,
+    clauseDate: null,
+    suggestedClause: null,
+    onMarket: false,
+    askPrice: null,
     notes: [],
     ...over,
   };
@@ -73,15 +78,19 @@ const SQUAD: Evaluated[] = [
 const NO_MARKET: MarketReport = {
   buys: [],
   sells: [],
+  listings: [],
   funds: 0,
+  committed: 0,
   maxOffer: 0,
   headline: "",
 };
 
 const NO_CLAUSES: ClauseReport = {
   steals: [],
+  pendingSteals: [],
   exposed: [],
   toLock: [],
+  windowNote: null,
   headline: "",
 };
 
@@ -139,13 +148,22 @@ describe("buildToday and departed players", () => {
       value: CARLOS.value,
       expectedPoints: 0,
       unavailableReason: "no longer in the competition (now at América)",
+      availability: "out",
     });
     const { actions } = buildToday(
       input({
         departed: [CARLOS],
         market: {
           ...NO_MARKET,
-          sells: [{ player, cost: 0, reason: "dead capital" }],
+          sells: [
+            {
+              player,
+              cost: 0,
+              directSell: null,
+              alreadyListed: false,
+              reason: "dead capital",
+            },
+          ],
         },
       }),
     );
@@ -162,7 +180,15 @@ describe("buildToday and departed players", () => {
         departed: [CARLOS],
         market: {
           ...NO_MARKET,
-          sells: [{ player: spare, cost: 0, reason: "never starts" }],
+          sells: [
+            {
+              player: spare,
+              cost: 0,
+              directSell: null,
+              alreadyListed: false,
+              reason: "never starts",
+            },
+          ],
         },
       }),
     );
@@ -172,5 +198,203 @@ describe("buildToday and departed players", () => {
   it("says nothing when nobody has left", () => {
     const { actions } = buildToday(input());
     expect(actions.some((a) => a.id.startsWith("departed-"))).toBe(false);
+  });
+});
+
+/**
+ * Our own listings, the clause window and multiple bids.
+ *
+ * All three are things the action list could not previously say anything about:
+ * it could not see a bid on our own listing, it recommended clause action on a
+ * day when no clause was payable, and it surfaced exactly one buy per day.
+ */
+describe("listing actions", () => {
+  const CLOSING = {
+    playerId: "carlos",
+    name: "Carlos Álvarez",
+    price: 18_931_044,
+    value: 18_931_044,
+    expiresAt: "2026-09-04T18:17:09.885Z",
+    hoursToExpiry: 6.3,
+    topBid: 18_204_532,
+    bidCount: 1,
+    directSell: 15_144_835,
+    reason: "Top bid 18.2M€, 727k€ under the asking price. Closes in 6 hours.",
+  };
+
+  it("raises a closing bid urgently, because it expires", () => {
+    const { actions } = buildToday(
+      input({ market: { ...NO_MARKET, listings: [CLOSING] } }),
+    );
+    const action = actions.find((a) => a.id === "listing-bid-carlos");
+
+    expect(action?.kind).toBe("listing");
+    expect(action?.urgency).toBe("now");
+    expect(action?.title).toMatch(/18\.2M€ bid on Carlos Álvarez/);
+  });
+
+  it("gives it no button, because accepting moves money", () => {
+    // And because it is not even established whether a machine-market listing
+    // needs acceptance at all (OPEN-4).
+    const { actions } = buildToday(
+      input({ market: { ...NO_MARKET, listings: [CLOSING] } }),
+    );
+    const action = actions.find((a) => a.id === "listing-bid-carlos");
+    expect(action?.automatable).toBeUndefined();
+  });
+
+  it("flags a listing about to lapse with nothing on it", () => {
+    const { actions } = buildToday(
+      input({
+        market: {
+          ...NO_MARKET,
+          listings: [
+            { ...CLOSING, playerId: "nino", name: "Adrián Niño", topBid: null, bidCount: 0 },
+          ],
+        },
+      }),
+    );
+    const action = actions.find((a) => a.id === "listing-stale-nino");
+    expect(action?.detail).toMatch(/Re-price or withdraw/);
+  });
+
+  it("says nothing about a listing that has already closed", () => {
+    const { actions } = buildToday(
+      input({
+        market: { ...NO_MARKET, listings: [{ ...CLOSING, hoursToExpiry: -2 }] },
+      }),
+    );
+    expect(actions.some((a) => a.id.startsWith("listing-"))).toBe(false);
+  });
+});
+
+describe("clause window action", () => {
+  it("says when the squad becomes clausable, so the block precedes it", () => {
+    const { actions } = buildToday(
+      input({
+        clauses: {
+          ...NO_CLAUSES,
+          windowNote:
+            "None of your squad can be claused until 2026-09-07 18:05Z. Block before then, not after.",
+        },
+      }),
+    );
+    const action = actions.find((a) => a.id === "clause-window");
+    expect(action?.detail).toMatch(/2026-09-07/);
+  });
+
+  it("says nothing when clauses are already live", () => {
+    const { actions } = buildToday(input());
+    expect(actions.some((a) => a.id === "clause-window")).toBe(false);
+  });
+});
+
+describe("buy actions", () => {
+  function buy(id: string, price: number, upgrade: number) {
+    return {
+      player: evaluated({ playerId: id, name: id, value: price }),
+      price,
+      upgrade,
+      replaces: null,
+      weeklyReturn: null,
+      ceiling: price * 2,
+      suggestedBid: price + 250_000,
+      increment: 250_000,
+      affordable: true,
+      reason: `+${upgrade} pts/round`,
+    };
+  }
+
+  it("surfaces several bids, not one", () => {
+    // One buy a day at the asking price was the binding constraint on turning
+    // 202M of idle cash into points.
+    const { actions } = buildToday(
+      input({
+        market: {
+          ...NO_MARKET,
+          funds: 200_000_000,
+          buys: [buy("a", 10_000_000, 3), buy("b", 8_000_000, 2), buy("c", 6_000_000, 1)],
+        },
+      }),
+    );
+    expect(actions.filter((a) => a.kind === "buy")).toHaveLength(3);
+  });
+
+  it("proposes the bid rather than the asking price", () => {
+    const { actions } = buildToday(
+      input({
+        market: { ...NO_MARKET, funds: 200_000_000, buys: [buy("a", 10_000_000, 3)] },
+      }),
+    );
+    const action = actions.find((a) => a.kind === "buy");
+    expect(action?.bid).toBe(10_250_000);
+    expect(action?.money).toBe(-10_250_000);
+    expect(action?.detail).toMatch(/Asking 10\.0M€; bidding 10\.3M€/);
+  });
+
+  it("stops proposing bids once winning them all would overspend", () => {
+    const { actions } = buildToday(
+      input({
+        market: {
+          ...NO_MARKET,
+          funds: 12_000_000,
+          buys: [buy("a", 10_000_000, 3), buy("b", 8_000_000, 2)],
+        },
+      }),
+    );
+    expect(actions.filter((a) => a.kind === "buy")).toHaveLength(1);
+  });
+
+  it("counts cash already held by a standing bid as spent", () => {
+    const { actions } = buildToday(
+      input({
+        market: {
+          ...NO_MARKET,
+          funds: 12_000_000,
+          committed: 5_000_000,
+          buys: [buy("a", 10_000_000, 3)],
+        },
+      }),
+    );
+    expect(actions.filter((a) => a.kind === "buy")).toHaveLength(0);
+  });
+});
+
+describe("prize-money wording in steal actions", () => {
+  function steal() {
+    return {
+      player: evaluated({ playerId: "target", name: "Target" }),
+      clausePrice: 5_000_000,
+      ownerTeamId: "rival",
+      ownerName: "Rival FC",
+      upgrade: 3,
+      replaces: null,
+      efficiency: 0.6,
+      discount: 1_000_000,
+      overSuggested: null,
+      affordable: true,
+      availableFrom: null,
+      clauseDateKnown: true,
+      reason: "5.00M€ for 3.0 pts/round better than someone.",
+    };
+  }
+
+  it("makes no money claim where the league pays nothing per point", () => {
+    const { actions } = buildToday(
+      input({ clauses: { ...NO_CLAUSES, steals: [steal()] } }),
+    );
+    const action = actions.find((a) => a.kind === "steal_clause");
+    expect(action?.detail).not.toMatch(/prize money/);
+  });
+
+  it("makes one where it does", () => {
+    const { actions } = buildToday(
+      input({
+        rules: { ...DEFAULT_RULES, pricePerPoint: 60_000 },
+        clauses: { ...NO_CLAUSES, steals: [steal()] },
+      }),
+    );
+    const action = actions.find((a) => a.kind === "steal_clause");
+    expect(action?.detail).toMatch(/180k€ a round in prize money/);
   });
 });

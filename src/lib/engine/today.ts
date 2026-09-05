@@ -9,8 +9,8 @@
 import type { ClauseReport, ExposedPlayer, StealCandidate } from "./clauses";
 import type { DepartedPlayer } from "./departed";
 import type { LineupChange, LineupPick } from "./lineup";
-import type { MarketReport } from "./market";
-import { fmtMoney, type LeagueRules } from "./types";
+import type { MarketReport, OwnListing } from "./market";
+import { fmtMoney, paysForPoints, type LeagueRules } from "./types";
 
 export type ActionKind =
   | "set_lineup"
@@ -18,11 +18,20 @@ export type ActionKind =
   | "steal_clause"
   | "buy"
   | "sell"
+  /**
+   * One of our own listings needs a decision: a bid standing against it, or an
+   * imminent expiry with nothing on it. Never automated and never given a
+   * button — accepting or cancelling moves money, and whether a machine-market
+   * listing even needs acceptance is not established (OPEN-4).
+   */
+  | "listing"
   | "info";
 
 export interface Action {
   id: string;
   kind: ActionKind;
+  /** What to actually offer, where that differs from the asking price. */
+  bid?: number;
   /** Sort key. Higher acts sooner. */
   weight: number;
   urgency: "now" | "today" | "whenever";
@@ -71,7 +80,11 @@ export function buildToday(input: TodayInput): TodayReport {
 
   actions.push(...lineupActions(input, hoursToDeadline));
   actions.push(...departureActions(input.departed));
+  // A bid on one of our own listings has a clock on it and outranks anything
+  // that will still be there tomorrow.
+  actions.push(...listingActions(input.market.listings));
   actions.push(...lockActions(input.clauses.toLock));
+  actions.push(...clauseWindowActions(input.clauses));
   actions.push(...stealActions(input.clauses.steals, input.rules));
   // Departures already have their own action, and a duplicate sell for the
   // same player reads as two separate problems.
@@ -150,7 +163,7 @@ function lineupActions(
   }
 
   const gain = lineupChanges.reduce((sum, c) => sum + Math.max(0, c.gain), 0);
-  const injuredIn = lineupChanges.some((c) => c.playerOut.unavailableReason);
+  const injuredIn = lineupChanges.some((c) => c.playerOut.availability === "out");
 
   // An injured starter is the single most expensive mistake available, so it
   // outranks everything including a large clause bargain.
@@ -248,16 +261,21 @@ function stealActions(steals: StealCandidate[], rules: LeagueRules): Action[] {
     .filter((s) => s.affordable)
     .slice(0, 3)
     .map((steal, index) => {
-      const weeklyReturn = steal.upgrade * rules.pricePerPoint;
+      // Only stated where the league genuinely pays for points. This league
+      // pays zero per point, and the sentence used to be printed regardless,
+      // at an invented 60.000€ rate.
+      const money = paysForPoints(rules)
+        ? ` Worth roughly ${fmtMoney(steal.upgrade * rules.pricePerPoint)} a round in prize money.`
+        : "";
+      const owner = steal.ownerName ? ` Currently at ${steal.ownerName}.` : "";
+
       return {
         id: `steal-${steal.player.playerId}`,
         kind: "steal_clause" as const,
         weight: 80 - index * 2 + Math.min(10, steal.upgrade * 3),
         urgency: "today" as const,
         title: `Pay ${steal.player.name}'s clause — ${fmtMoney(steal.clausePrice)}`,
-        detail: `${steal.reason} Worth roughly ${fmtMoney(weeklyReturn)} a round in prize money${
-          steal.ownerName ? `. Currently at ${steal.ownerName}` : ""
-        }.`,
+        detail: `${steal.reason}${money}${owner}`,
         pointsAtStake: steal.upgrade,
         money: -steal.clausePrice,
         playerId: steal.player.playerId,
@@ -266,40 +284,178 @@ function stealActions(steals: StealCandidate[], rules: LeagueRules): Action[] {
     });
 }
 
+/**
+ * When the clause window has not opened yet, say when it does.
+ *
+ * Ranked above a marginal buy and below anything urgent: it is not something to
+ * do today, it is something that stops being possible if it is left until the
+ * window is already open and a rival has moved first.
+ */
+function clauseWindowActions(clauses: ClauseReport): Action[] {
+  if (!clauses.windowNote) return [];
+  const next = clauses.pendingSteals.find((s) => s.affordable);
+  const target = next
+    ? ` ${next.player.name}'s clause opens then too, at ${fmtMoney(next.clausePrice)}.`
+    : "";
+
+  return [
+    {
+      id: "clause-window",
+      kind: "info",
+      weight: 55,
+      urgency: "whenever",
+      title: "No clause is payable yet",
+      detail: `${clauses.windowNote}${target}`,
+      pointsAtStake: 0,
+    },
+  ];
+}
+
+/**
+ * Our own listings. Both cases here expire, which is what makes them urgent:
+ * a bid closing inside the lineup window is worth more attention than a buy
+ * that will still be available tomorrow.
+ *
+ * Never automated and never given a button. Accepting or cancelling moves
+ * money, and it is not even established whether a machine-market listing
+ * auto-sells to the highest bidder at expiry or needs acceptance (OPEN-4), so
+ * the honest output is a report.
+ */
+function listingActions(listings: OwnListing[]): Action[] {
+  const actions: Action[] = [];
+
+  for (const [index, listing] of listings.slice(0, 3).entries()) {
+    const closed = listing.hoursToExpiry !== null && listing.hoursToExpiry < 0;
+    if (closed) continue;
+
+    const soon = listing.hoursToExpiry !== null && listing.hoursToExpiry <= 24;
+
+    if (listing.topBid !== null) {
+      actions.push({
+        id: `listing-bid-${listing.playerId}`,
+        kind: "listing",
+        // Just under a broken XI: it is money, it has a deadline, and it
+        // disappears rather than waiting for the next report.
+        weight: (soon ? 87 : 62) - index,
+        urgency: soon ? "now" : "today",
+        title: `${fmtMoney(listing.topBid)} bid on ${listing.name}`,
+        detail: listing.reason,
+        pointsAtStake: 0,
+        money: listing.topBid,
+        playerId: listing.playerId,
+        playerName: listing.name,
+      });
+      continue;
+    }
+
+    // No bids and about to expire: re-price or withdraw, but only worth saying
+    // while there is still time to do either.
+    if (soon) {
+      actions.push({
+        id: `listing-stale-${listing.playerId}`,
+        kind: "listing",
+        weight: 58 - index,
+        urgency: "today",
+        title: `${listing.name} expires with no bids`,
+        detail: `${listing.reason} Re-price or withdraw before it lapses.`,
+        pointsAtStake: 0,
+        money: listing.price,
+        playerId: listing.playerId,
+        playerName: listing.name,
+      });
+    }
+  }
+
+  return actions;
+}
+
+/**
+ * How many buys to surface at once.
+ *
+ * The old limit was one, which capped the spend rate at a single player a day
+ * at the asking price — the binding constraint on turning 202M of idle cash
+ * into points, with two dozen listings live at any moment. Three, because
+ * `buildActionButtons` caps at four rows and the other kinds need one, and
+ * because `mbp`/`vmb` are both 3 and may well cap simultaneous bids (OPEN-5):
+ * three is safe under either reading.
+ */
+const MAX_BUY_ACTIONS = 3;
+
 function marketActions(
   market: MarketReport,
   skipPlayerIds: ReadonlySet<string>,
 ): Action[] {
   const actions: Action[] = [];
 
-  const topBuy = market.buys.find((b) => b.affordable);
-  if (topBuy) {
+  // Winning every proposed bid at once must remain affordable, so each bid is
+  // checked against what is left after the ones already proposed and after the
+  // cash Futmondo is already withholding for standing bids.
+  let remaining = Math.max(0, market.funds - market.committed);
+
+  const affordable = market.buys.filter((b) => b.affordable);
+  for (const [index, buy] of affordable.entries()) {
+    if (actions.length >= MAX_BUY_ACTIONS) break;
+    if (buy.suggestedBid > remaining) continue;
+    remaining -= buy.suggestedBid;
+
+    // The ceiling and the bid are stated separately: the confirmation is meant
+    // to be an informed decision, not a number to trust.
+    const pricing =
+      buy.suggestedBid > buy.price
+        ? ` Asking ${fmtMoney(buy.price)}; bidding ${fmtMoney(
+            buy.suggestedBid,
+          )} in ${fmtMoney(buy.increment)} steps, worth up to ${fmtMoney(buy.ceiling)} to us.`
+        : ` Worth up to ${fmtMoney(buy.ceiling)} to us.`;
+
     actions.push({
-      id: `buy-${topBuy.player.playerId}`,
+      id: `buy-${buy.player.playerId}`,
       kind: "buy",
-      weight: 60 + Math.min(15, topBuy.upgrade * 4),
+      weight: 60 - index + Math.min(15, buy.upgrade * 4),
       urgency: "today",
-      title: `Bid on ${topBuy.player.name} — ${fmtMoney(topBuy.price)}`,
-      detail: topBuy.reason,
-      pointsAtStake: topBuy.upgrade,
-      money: -topBuy.price,
-      playerId: topBuy.player.playerId,
-      playerName: topBuy.player.name,
+      title: `Bid ${fmtMoney(buy.suggestedBid)} for ${buy.player.name}`,
+      detail: `${buy.reason}${pricing}`,
+      pointsAtStake: buy.upgrade,
+      money: -buy.suggestedBid,
+      bid: buy.suggestedBid,
+      playerId: buy.player.playerId,
+      playerName: buy.player.name,
     });
   }
 
-  // Selling matters most when it is free and unlocks something better.
+  if (actions.length > 1) {
+    const total = actions.reduce((sum, a) => sum + Math.abs(a.money ?? 0), 0);
+    actions.push({
+      id: "buy-budget",
+      kind: "info",
+      weight: 45,
+      urgency: "whenever",
+      title: `${actions.length} bids total ${fmtMoney(total)}`,
+      detail: `Winning all of them stays inside the ${fmtMoney(
+        Math.max(0, market.funds - market.committed),
+      )} not already held by a standing bid.`,
+      money: -total,
+    });
+  }
+
+  // Selling matters most when it is free and unlocks something better. A player
+  // already on the market is skipped: the sale is in progress, and a second
+  // "sell him" line reads as a second problem.
   const worthSelling = market.sells.filter(
-    (s) => s.cost === 0 && !skipPlayerIds.has(s.player.playerId),
+    (s) =>
+      s.cost === 0 && !s.alreadyListed && !skipPlayerIds.has(s.player.playerId),
   );
   for (const [index, sell] of worthSelling.slice(0, 2).entries()) {
+    const floor =
+      sell.directSell !== null
+        ? ` Or ${fmtMoney(sell.directSell)} guaranteed, straight to the machine.`
+        : "";
     actions.push({
       id: `sell-${sell.player.playerId}`,
       kind: "sell",
       weight: 50 - index,
       urgency: "whenever",
       title: `Sell ${sell.player.name} — ${fmtMoney(sell.player.value)}`,
-      detail: sell.reason,
+      detail: `${sell.reason}${floor}`,
       pointsAtStake: 0,
       money: sell.player.value,
       playerId: sell.player.playerId,
