@@ -116,11 +116,9 @@ export function ClausesClient({ initial }: { initial: AnalysisReport }) {
                 <span className="text-zinc-200">{steal.player.name}</span>{" "}
                 <Money value={steal.clausePrice} /> — +
                 {steal.upgrade.toFixed(1)} pts, from{" "}
-                {new Date(steal.availableFrom as string)
-                  .toISOString()
-                  .replace("T", " ")
-                  .slice(0, 16)}
-                Z
+                {steal.availableFrom
+                  ? `${steal.availableFrom.replace("T", " ").slice(0, 16)}Z`
+                  : ""}
               </li>
             ))}
           </ul>

@@ -187,9 +187,8 @@ function windowNote(exposed: ExposedPlayer[]): string | null {
 }
 
 function formatWhen(iso: string): string {
-  const when = new Date(iso);
-  if (Number.isNaN(when.getTime())) return iso;
-  return when.toISOString().replace("T", " ").slice(0, 16) + "Z";
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(iso)) return iso;
+  return `${iso.replace("T", " ").slice(0, 16)}Z`;
 }
 
 function findSteals(
