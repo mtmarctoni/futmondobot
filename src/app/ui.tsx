@@ -282,13 +282,22 @@ export function PlayerRow({
             {player.name}
           </span>
           {player.unavailableReason && (
+            // A doubt and an absence are different facts and used to render
+            // identically, which made a fit player carrying a knock look like
+            // an injury. Amber for one, rose for the other.
             <span
-              className="shrink-0 rounded bg-rose-500/15 px-1.5 py-0.5 text-xs text-rose-300"
+              className={`shrink-0 rounded px-1.5 py-0.5 text-xs ${
+                player.availability === "doubt"
+                  ? "bg-amber-500/15 text-amber-300"
+                  : "bg-rose-500/15 text-rose-300"
+              }`}
               title={player.unavailableReason}
             >
               {player.unavailableReason.startsWith("no longer in the competition")
                 ? "left the league"
-                : "out"}
+                : player.availability === "doubt"
+                  ? "doubtful"
+                  : "out"}
             </span>
           )}
           {player.clauseLocked && (

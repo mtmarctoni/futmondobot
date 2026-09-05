@@ -26,7 +26,9 @@ export async function GET(req: NextRequest) {
   let notifyError: string | null = null;
   try {
     // Telegram failing must not hide that the lineup was written.
-    ({ sent } = await sendReport(result.report));
+    // The notes are how a lineup write and a clause block become visible: they
+    // leave no trace in any Futmondo payload.
+    ({ sent } = await sendReport(result.report, result.notes));
   } catch (err) {
     notifyError = err instanceof Error ? err.message : String(err);
   }

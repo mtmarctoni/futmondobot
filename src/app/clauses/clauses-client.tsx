@@ -45,6 +45,14 @@ export function ClausesClient({ initial }: { initial: AnalysisReport }) {
         <RefreshButton onClick={refresh} loading={loading} />
       </div>
 
+      {clauses.windowNote && (
+        <p className="rounded-lg border border-sky-900/50 bg-sky-950/20 px-3 py-2 text-sm text-sky-200">
+          {clauses.windowNote} A clause has a date before which nobody can pay
+          it, in either direction — so there is nothing to take and nothing to
+          defend until then.
+        </p>
+      )}
+
       {data.coverage.playersWithClause === 0 && (
         <p className="rounded-lg border border-amber-900/50 bg-amber-950/20 px-3 py-2 text-sm text-amber-200">
           No clause prices collected yet. A clause price is only available one
@@ -96,6 +104,28 @@ export function ClausesClient({ initial }: { initial: AnalysisReport }) {
           </ul>
         )}
       </Card>
+
+      {clauses.pendingSteals.length > 0 && (
+        <Card
+          title="Opens later"
+          subtitle="Worth taking, but the clause is not payable yet. Planning information, not something to do today."
+        >
+          <ul className="space-y-1 text-sm">
+            {clauses.pendingSteals.slice(0, 6).map((steal) => (
+              <li key={steal.player.playerId} className="text-zinc-400">
+                <span className="text-zinc-200">{steal.player.name}</span>{" "}
+                <Money value={steal.clausePrice} /> — +
+                {steal.upgrade.toFixed(1)} pts, from{" "}
+                {new Date(steal.availableFrom as string)
+                  .toISOString()
+                  .replace("T", " ")
+                  .slice(0, 16)}
+                Z
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
 
       {outOfReach.length > 0 && (
         <Card title="Out of reach" subtitle="Good targets you cannot pay for yet.">
