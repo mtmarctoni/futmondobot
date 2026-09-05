@@ -12,7 +12,7 @@ import { dbTokenStore } from "../db/token-store";
 import * as repo from "../db/repo";
 import { FutmondoClient, type Scope } from "../futmondo/client";
 import { FutmondoError } from "../futmondo/errors";
-import type { MatchOdds, Player } from "../futmondo/types";
+import type { MatchOdds, Player, PlayerRoundRecord } from "../futmondo/types";
 import { fetchFitness, SOURCE_NAME } from "../providers/futbolfantasy";
 import { NameMatcher } from "../providers/name-match";
 
@@ -176,7 +176,17 @@ export async function syncAvailability(client?: FutmondoClient): Promise<SyncRep
     string,
     unknown
   >[];
-  const clubIds = rows.map((r) => String(r.team_id));
+
+  // Club ids on the players table include the foreign clubs of players who have
+  // been transferred out of the competition, which is how a 20-club league came
+  // to be polled 26 times. Those clubs have no fixtures here and never will, so
+  // the calendar -- the only place the competition enumerates itself -- is the
+  // right filter. The set grows with every transfer out if it is not applied.
+  const competition = await repo.getCompetitionClubs();
+  const all = rows.map((r) => String(r.team_id));
+  const clubIds =
+    competition.size > 0 ? all.filter((id) => competition.has(id)) : all;
+  wrote.clubsSkipped = all.length - clubIds.length;
 
   if (clubIds.length === 0) {
     warnings.push("No club ids known yet — run the daily sync first.");
@@ -262,7 +272,10 @@ export async function backfillRoundPoints(
 
   let rowsWritten = 0;
   let emptyLineups = 0;
-  for (const row of pending) {
+  let calls = 0;
+  let gaveUp = false;
+
+  outer: for (const row of pending) {
     const roundId = String(row.round_id);
     for (const teamId of teamIds) {
       try {
@@ -271,10 +284,21 @@ export async function backfillRoundPoints(
           teamId,
           roundId,
         );
+        calls += 1;
         if (lineup.players.length === 0) emptyLineups += 1;
         rowsWritten += await repo.upsertRoundPoints(lineup);
       } catch (err) {
+        calls += 1;
         warnings.push(`roundlineup ${roundId}/${teamId}: ${reason(err)}`);
+      }
+
+      // The endpoint is dead here: it answers, reports the right formation and
+      // returns no players. Finding that out is worth one call a run, not
+      // twenty-seven. The job is kept rather than deleted because the endpoint
+      // may start working, and this is what makes checking cheap.
+      if (calls >= PROBE_CALLS && rowsWritten === 0) {
+        gaveUp = true;
+        break outer;
       }
     }
   }
@@ -282,16 +306,13 @@ export async function backfillRoundPoints(
   wrote.roundsProcessed = pending.length;
   wrote.playerRounds = rowsWritten;
   wrote.emptyLineups = emptyLineups;
+  wrote.calls = calls;
 
-  // The endpoint answers, reports the right formation, and returns no players
-  // at all -- so it looks like a working call that found nothing rather than a
-  // failure. Said out loud, because the alternative is spending nine requests
-  // per round forever and quietly concluding the squad never played.
-  if (emptyLineups > 0 && rowsWritten === 0) {
+  if (gaveUp) {
     warnings.push(
-      `/1/userteam/roundlineup returned no players for all ${emptyLineups} team-rounds requested. ` +
-        "Per-round minutes cannot be collected this way; form is coming from the scoring " +
-        "record on the roster payload instead. See docs/futmondo-api.md.",
+      `/1/userteam/roundlineup returned no players for the first ${calls} team-rounds requested, ` +
+        "so the rest of the run was skipped. Per-round starts now come from " +
+        "/1/player/summary instead; see docs/futmondo-api.md.",
     );
   }
 
@@ -299,16 +320,35 @@ export async function backfillRoundPoints(
 }
 
 /**
- * Clause prices, the one number that decides every steal. Only available one
- * player at a time, so this is the most expensive job in the app.
+ * How many team-rounds to try before concluding `/1/userteam/roundlineup` is
+ * still returning nothing. Two rather than one so a single odd round does not
+ * end the run.
+ */
+const PROBE_CALLS = 2;
+
+/**
+ * Per-player summaries: clause price, clause window, suggested clause, the
+ * measured start record and the value history.
  *
- * Players are prioritised by how stale their clause is and how much they score:
- * a cheap high-scorer whose clause we last read a week ago is worth a call, the
- * fourth-choice goalkeeper is not. `limit` bounds the run so it fits inside a
- * function timeout.
+ * Named for clauses because that is what it started as, but `/1/player/summary`
+ * carries far more than a clause price and the call is already being made. In
+ * one request per player it gives:
+ *
+ *   - `championship.clause.{price,date,suggestedClause}` — the clause, and the
+ *     instant it can first be paid, which decides whether any clause advice is
+ *     actionable at all.
+ *   - `points[]` — a real start record per round. This is what `round_points`
+ *     was supposed to hold and never did, and start probability is the largest
+ *     term in every projection.
+ *   - `prices[]` — daily value history reaching back before our first snapshot.
+ *
+ * Candidate selection changed with it. Only rivals' players used to be
+ * considered, on the reasoning that only a rival's player can be claused — but
+ * our own players are exactly the ones whose start rate decides our XI, so the
+ * squad is refreshed every run and rivals rotate by staleness.
  */
 export async function syncClausePrices(
-  options: { limit?: number } = {},
+  options: { limit?: number; ownLimit?: number } = {},
   client?: FutmondoClient,
 ): Promise<SyncReport> {
   const started = Date.now();
@@ -317,9 +357,20 @@ export async function syncClausePrices(
   const { client: api, scope } = await context(client);
   const date = repo.today();
   const limit = options.limit ?? 60;
+  const ownLimit = options.ownLimit ?? 20;
 
   const sql = getSql();
-  const candidates = (await sql`
+
+  // Our own squad first and in full: their start rate sets the lineup, and
+  // there are only fifteen of them.
+  const mine = (await sql`
+    SELECT DISTINCT ON (player_id) player_id
+    FROM player_snapshots
+    WHERE owner_team_id = ${scope.userteamId}
+    ORDER BY player_id, snapshot_date DESC
+    LIMIT ${ownLimit}`) as Record<string, unknown>[];
+
+  const rivals = (await sql`
     WITH latest AS (
       SELECT DISTINCT ON (player_id)
         player_id, snapshot_date, owner_team_id, points, value
@@ -340,19 +391,37 @@ export async function syncClausePrices(
     ORDER BY
       c.seen NULLS FIRST,
       l.points DESC NULLS LAST
-    LIMIT ${limit}`) as Record<string, unknown>[];
+    LIMIT ${Math.max(0, limit - mine.length)}`) as Record<string, unknown>[];
+
+  const playerIds = [
+    ...new Set([...mine, ...rivals].map((row) => String(row.player_id))),
+  ];
 
   const snapshots: repo.SnapshotInput[] = [];
-  for (const row of candidates) {
-    const playerId = String(row.player_id);
+  const rounds: { playerId: string; rounds: PlayerRoundRecord[] }[] = [];
+  const values: { playerId: string; date: string; value: number }[] = [];
+
+  for (const playerId of playerIds) {
     try {
       const summary = await api.getPlayerSummary(scope, playerId);
       if (!summary) continue;
       snapshots.push({
         playerId,
         clausePrice: summary.clausePrice,
+        clauseDate: summary.clauseDate,
+        suggestedClause: summary.suggestedClause,
         locked: summary.locked,
       });
+      if (summary.rounds.length > 0) {
+        rounds.push({ playerId, rounds: summary.rounds });
+      }
+      for (const point of summary.prices) {
+        // Rule 9: these are instants, and the snapshot key is a calendar day in
+        // the league's own timezone, so the conversion goes through `today`
+        // rather than slicing the ISO string.
+        const day = dayOf(point.date);
+        if (day) values.push({ playerId, date: day, value: point.price });
+      }
       // The slug lives nowhere else and is required to actually pay a clause.
       if (summary.slug) await repo.setPlayerSlug(playerId, summary.slug);
     } catch (err) {
@@ -360,10 +429,29 @@ export async function syncClausePrices(
     }
   }
 
-  wrote.playersChecked = candidates.length;
+  wrote.playersChecked = playerIds.length;
+  wrote.ownPlayers = mine.length;
   wrote.clausesSaved = await repo.writeSnapshots(date, snapshots);
 
+  try {
+    wrote.roundRecords = await repo.upsertPlayerRounds(rounds);
+  } catch (err) {
+    warnings.push(`round records: ${reason(err)}`);
+  }
+
+  try {
+    wrote.valuesBackfilled = await repo.backfillValues(values);
+  } catch (err) {
+    warnings.push(`value backfill: ${reason(err)}`);
+  }
+
   return { job: "clauses", wrote, warnings, durationMs: Date.now() - started };
+}
+
+/** The league's calendar day for an instant, or null if it will not parse. */
+function dayOf(instant: string): string | null {
+  const parsed = new Date(instant);
+  return Number.isNaN(parsed.getTime()) ? null : repo.today(parsed);
 }
 
 /** Everything on the cheap schedule, in dependency order. */
