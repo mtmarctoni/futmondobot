@@ -132,7 +132,16 @@ export function escapeHtml(value: string): string {
     .replace(/>/g, "&gt;");
 }
 
-export function formatReport(report: AnalysisReport): string {
+/**
+ * @param automationNotes What the scheduled run did by itself. Passed in rather
+ * than read off the report because only the caller knows: a lineup write and a
+ * clause block leave no trace in any Futmondo payload, so if the message does
+ * not say they happened, nothing does.
+ */
+export function formatReport(
+  report: AnalysisReport,
+  automationNotes: string[] = [],
+): string {
   const lines: string[] = [];
 
   if (report.error) {
@@ -184,6 +193,9 @@ export function formatReport(report: AnalysisReport): string {
   );
   for (const action of done) {
     lines.push(`\n✓ ${escapeHtml(action.title)}`);
+  }
+  for (const note of automationNotes.slice(0, 4)) {
+    lines.push(`\n✓ ${escapeHtml(note)}`);
   }
 
   if (report.warnings.length > 0) {
@@ -264,14 +276,32 @@ export function formatXI(report: AnalysisReport): string {
   // who have left the competition are skipped here because they already have
   // their own block, and their reason reads as a parenthetical inside one.
   const departedIds = new Set(report.departed.map((p) => p.playerId));
-  const doubtful = lineup.excluded.filter(
+  const sidelined = lineup.excluded.filter(
     (p) => p.unavailableReason && !departedIds.has(p.playerId),
   );
-  if (doubtful.length > 0) {
+  if (sidelined.length > 0) {
+    // "out" and "doubtful" are different decisions for the reader: one is a
+    // hole to fill, the other is a judgement they may be able to make better
+    // than we can with an hour to go.
+    const label = (p: (typeof sidelined)[number]) =>
+      p.availability === "doubt"
+        ? "doubtful"
+        : escapeHtml(p.unavailableReason ?? "out");
     lines.push(
-      `<i>Left out: ${doubtful
-        .map((p) => `${escapeHtml(p.name)} (${escapeHtml(p.unavailableReason ?? "")})`)
+      `<i>Left out: ${sidelined
+        .map((p) => `${escapeHtml(p.name)} (${label(p)})`)
         .join(", ")}</i>`,
+    );
+  }
+
+  // A doubt that made the XI anyway is worth naming too: the projection is
+  // already discounted for it, but the reader may know more than we do.
+  const doubtfulStarters = lineup.starters.filter((p) => p.availability === "doubt");
+  if (doubtfulStarters.length > 0) {
+    lines.push(
+      `<i>Fitness doubts in the XI: ${doubtfulStarters
+        .map((p) => escapeHtml(p.name))
+        .join(", ")} — still the best available.</i>`,
     );
   }
 
@@ -306,7 +336,9 @@ export function buildActionButtons(report: AnalysisReport): InlineButton[][] {
             : null;
     if (!verb) continue;
 
-    const price = Math.abs(action.money ?? 0);
+    // The bid, not the asking price: a button that offers the floor loses every
+    // contested auction, which is what it used to do.
+    const price = action.bid ?? Math.abs(action.money ?? 0);
     const label =
       verb === "clause"
         ? `Pay clause: ${action.playerName} (${fmtMoney(price)})`
@@ -357,6 +389,9 @@ export function buildConfirmButtons(
   ];
 }
 
-export async function sendReport(report: AnalysisReport): Promise<{ sent: number }> {
-  return notify(formatReport(report), buildActionButtons(report));
+export async function sendReport(
+  report: AnalysisReport,
+  automationNotes: string[] = [],
+): Promise<{ sent: number }> {
+  return notify(formatReport(report, automationNotes), buildActionButtons(report));
 }

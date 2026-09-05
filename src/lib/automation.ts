@@ -100,7 +100,23 @@ export async function runAutomation(
       exposed: report.clauses.toLock,
       dryRun,
     });
+    // Said out loud, always. A free, automated, reversible action that leaves
+    // no trace anywhere is indistinguishable from one that never ran -- which
+    // is exactly the state this was in: `toLock` reported fifteen players and
+    // `action_log` contained no lock row in the app's entire history.
+    if (locks.locked.length > 0) {
+      notes.push(
+        `${dryRun ? "Would block" : "Blocked"} ${locks.locked.length} clause${
+          locks.locked.length > 1 ? "s" : ""
+        }: ${locks.locked.map((l) => l.name).join(", ")}.`,
+      );
+    }
+    if (locks.skipped > 0) {
+      notes.push(`${locks.skipped} more exposed player(s) were left for the next run.`);
+    }
     notes.push(...locks.errors);
+  } else if (report.clauses.windowNote) {
+    notes.push(report.clauses.windowNote);
   }
 
   // Re-run so the message reflects what we just did rather than the state
