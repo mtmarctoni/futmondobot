@@ -77,16 +77,49 @@ These are load-bearing. Breaking one produces a bug that is expensive and quiet.
 
 - **A parser that reads the wrong key never fails; it returns a neutral default
   and the report still looks plausible.** Every real bug found so far is this
-  one bug: `role()` missing `CENTROCAMPISTA` deleted every midfielder in the
-  league; `parseMatch` reading `home`/`away` instead of `h`/`a` left all 380
-  fixtures without a team id, so opponent strength could not attach to a player
-  and facing Barcelona scored the same as facing the bottom club; `parseOdds`
-  expecting a flat result priced zero fixtures; `parseRoster` reading `clause`
-  and `market` as flat values when both are objects, so no roster row ever
-  reported a clause price or a listing. The unit suite was green throughout all
-  four, because the fixtures were written from the same wrong assumption as the
-  code. **A parser test is worth nothing unless its fixture is a real captured
-  payload.**
+  one bug, six times over: `role()` missing `CENTROCAMPISTA` deleted every
+  midfielder in the league; `parseMatch` reading `home`/`away` instead of
+  `h`/`a` left all 380 fixtures without a team id, so opponent strength could
+  not attach to a player and facing Barcelona scored the same as facing the
+  bottom club; `parseOdds` expecting a flat result priced zero fixtures;
+  `parseRoster` reading `clause` and `market` as flat values when both are
+  objects, so no roster row ever reported a clause price or a listing;
+  `parseChampionshipConfiguration` looking for `perPoint` inside a `bonus`
+  object that does not exist instead of the flat `moneyPerPoint`, so the engine
+  fell through to a hardcoded 60.000€ per point and **every prize-money figure
+  the app has ever printed was invented** — this league pays zero per point;
+  `parseMarket` reading the bid count from `bids`/`numBids`/`offers` when the
+  field is `numberOfBids`, and is a *string* valued `"-"` when hidden. The unit
+  suite was green throughout all six, because the fixtures were written from
+  the same wrong assumption as the code. **A parser test is worth nothing
+  unless its fixture is a real captured payload.**
+
+- **A default that stands in for "not configured" hides a real zero.** The
+  configuration bug above was only half a parser bug: the other half was
+  `config.pointBonus ?? DEFAULT.pricePerPoint`, which cannot distinguish "the
+  league pays nothing" from "we could not read it". `DEFAULT_RULES.pricePerPoint`
+  is now 0 and every consumer omits the money sentence rather than printing
+  "0€". If you add a rule, ask what its zero means before choosing a default.
+
+- **`doubt` is not `injured`.** Availability is graded, in
+  `src/lib/engine/availability.ts`: `out` zeroes a projection, `doubt`
+  multiplies it, and an **unrecognised reason degrades rather than deletes** —
+  a new Futmondo wording must never be able to empty a position. Treating the
+  two alike forced three of a fifteen-player squad to zero, left ten fit
+  outfield players for eleven shirts so no formation could be filled, and
+  produced sell advice on a fit 17M forward as "dead capital".
+
+- **Nothing reports whether a clause is blocked.** The clause object is
+  `{price, date, transferred, suggestedClause}` in every payload that has one.
+  So the lock automation cannot observe the effect of its own write, and
+  `action_log` is the only record that a block exists — weaker than a reading,
+  because a rival's clause payment could clear it silently. Do not "fix" this
+  by assuming a lock succeeded permanently.
+
+- **A clause has a date before which nobody can pay it**, in either direction.
+  Read `clause.date`; never derive it. Drafted players get acquisition + 5 days
+  to the millisecond, bought players get end-of-local-day + 2, and a formula
+  reconciling those would be a guess about a decision that spends millions.
 
 - **A player transferred out of the league stays in Futmondo, looking normal.**
   He keeps a squad slot, a value, a clause price, and can still be fielded; he
@@ -120,12 +153,25 @@ These are load-bearing. Breaking one produces a bug that is expensive and quiet.
 - Bulk writes use `UNNEST` with explicit casts so a batch is one parameterised
   round trip. Follow the existing pattern rather than looping statements.
 - Expected points are real points, not a normalised index, so numbers stay
-  interpretable and convert to prize money at the league's own rate.
-- **Form comes from the `average` object on the roster payload, not from
-  `round_points`.** `/1/userteam/roundlineup` returns an empty player list even
-  for a closed round, so that table never fills; see `docs/futmondo-api.md`.
-  Waiting for it meant every player scored the bare role prior and the lineup
-  page showed one identical number per position.
+  interpretable — and convert to prize money **only where the league actually
+  pays for points**. `paysForPoints(rules)` gates every money sentence.
+- **Form comes from the `average` object on the roster payload, and the start
+  record from `/1/player/summary`'s `points[]` — never from
+  `/1/userteam/roundlineup`.** That endpoint returns an empty player list even
+  for a closed round; waiting for it meant every player scored the bare role
+  prior and the lineup page showed one identical number per position.
+  `backfillRoundPoints` is kept only to notice if it ever starts working, and
+  gives up after two empty calls rather than spending twenty-seven.
+- **Rank buys by absolute upgrade, not by points per million**, while cash is
+  abundant. Efficiency is right when funds bind and wrong when they do not: with
+  202M idle in a 210M budget and no yield on cash, it put a 1.0M defender at the
+  top of the list. `runMarket` decides which regime applies from the candidates
+  in front of it.
+- **Bid above the asking price.** The ask is the auction floor, so proposing it
+  loses every contested listing by construction. The step comes from
+  `/1/market/playerauctionsummary`'s `increment` — an off-step bid may be
+  rejected outright — and the markup over it is an admitted placeholder until
+  the `transfers` ledger has enough rows to fit a clearing price.
 - **This league has no bench** (`bench.enabled: false`), and `planMoves` can only
   promote a substitute, so the automatic lineup writer cannot move anything here.
   The recommendation is the deliverable: the daily message prints the XI in full,
@@ -170,6 +216,7 @@ src/lib/db/         schema, migrations, repository, session store
 src/lib/sync/       the jobs that accumulate history the API forgets
 src/lib/engine/     expected points -> lineup, market, clauses -> today's actions
 src/lib/engine/departed.ts  players who have left the competition, from the calendar
+src/lib/engine/availability.ts  graded availability: out vs doubt vs fit
 src/lib/engine/apply.ts   the only place that writes to Futmondo automatically
 src/lib/providers/  probable-lineup scrape and name matching
 src/lib/telegram/   message formatting and button callbacks

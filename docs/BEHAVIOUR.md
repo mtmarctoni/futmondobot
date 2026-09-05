@@ -29,26 +29,56 @@ Every recommendation reduces to one number, computed once in
 expectedPoints = startProbability x pointsPerStart x fixtureFactor
 ```
 
-It is denominated in **real points**, not a 0-100 score, which is what lets any
-recommendation convert to money at the league's own rate. At 60.000€ per point,
-"+1.4 pts/round" is "about 84k a round".
+It is denominated in **real points**, not a 0-100 score, which is what lets a
+recommendation convert to money **at the league's own rate, where there is
+one**. This league's `moneyPerPoint` is 0 — all 40M of prize money is
+distributed by round ranking — so the app states no euro figure for points at
+all. It used to state one, at an invented 60.000€ per point, because the
+configuration parser read a key that does not exist. Points remain the whole
+objective; euros are simply the wrong unit for them here.
 
 ### startProbability
 
 The single biggest factor, because a player who does not play scores nothing.
 
-1. `0` if Futmondo reports them injured or suspended (`/2/team/unavailableplayers`).
-2. A scraped probable-XI percentage, where one exists.
-3. Otherwise how often they have recently played 60+ minutes, shrunk towards
-   0.5 — two starts out of two is suggestive, not certain.
+1. A scraped probable-XI percentage, where one exists.
+2. A **measured** start rate from `/1/player/summary`'s `points[]`, which
+   records whether the player was in the starting XI each round. This
+   distinguishes a starter from a player who appears off the bench every week —
+   the appearance-share estimate below cannot.
+3. Otherwise the share of rounds they have appeared in, shrunk towards 0.5 —
+   two starts out of two is suggestive, not certain.
 4. `0.5` when nothing is known, because that is honest.
+
+Availability then **multiplies** that number rather than replacing it:
+
+| Severity | Reasons | Multiplier |
+|---|---|---|
+| `out` | `injured`, `injured2`, `redcard`, suspension, left the competition | 0 |
+| `doubt` | `doubt`, and **anything unrecognised** | 0.45 |
+| `fit` | `""`, `"ok"` | 1 |
+
+Two things about that table matter more than the numbers in it. An unrecognised
+reason degrades a projection and never deletes a player, so a new Futmondo
+wording cannot silently empty a position. And `doubt` is not `injured`: grading
+them alike zeroed three of a fifteen-player squad, leaving ten fit outfield
+players for eleven shirts, so no formation could be filled and the picker
+fielded a body it scored at 0.0. The 0.45 is a stated guess, named next to the
+model constants so it can be tuned once the measured start record has enough
+rounds to say what share of doubtful players actually start.
+
+Availability comes from three sources, merged so the most severe reading wins:
+the per-club injury endpoint (most precise reason), the `status` field on every
+roster and market row (free, and the only one that reaches market listings),
+and the departure scan (strongest fact, always wins).
 
 ### pointsPerStart
 
-Mean points in rounds the player actually played, from `round_points`. Blended
-towards a per-role prior with a weight equivalent to two prior rounds, so a
-single spectacular week is not mistaken for form and a player with no history
-still gets a usable projection.
+Mean points in rounds the player actually played, from `round_points` where a
+per-round record exists and from the roster payload's `average` object
+otherwise. Blended towards a per-role prior with a weight equivalent to two
+prior rounds, so a single spectacular week is not mistaken for form and a
+player with no history still gets a usable projection.
 
 ### fixtureFactor
 
@@ -72,9 +102,12 @@ it by brute force.
 
 Two behaviours worth knowing:
 
-- An unavailable player is never picked while a fit replacement exists, **but is
-  fielded rather than leaving a slot empty**, because Futmondo scores a missing
-  place as zero and an unfit body might not.
+- Selection is on expected points alone. An `out` player sinks to the bottom by
+  himself, because a zero start probability makes his projection zero — but he
+  is still **fielded rather than leaving a slot empty**, since Futmondo scores a
+  missing place as zero and an unfit body might not. A `doubt` competes on his
+  discounted projection, which is the point of grading availability: sorting him
+  behind every fit player as well would count the doubt twice.
 - A formation the squad cannot fill always loses to one it can, however good the
   filled slots look.
 
@@ -98,7 +131,8 @@ total gain is below 0.5 expected points.
 `src/lib/engine/market.ts`. Two distinct things earn money here and they are not
 the same:
 
-- **Points**, at 60.000€ each.
+- **Points.** Worth a euro figure only where the league pays per point; here it
+  does not, so points are ranked and never priced.
 - **Value drift.** Futmondo revalues players daily. Buying a rising player and
   selling a falling one compounds, and it is invisible without stored history.
 
@@ -107,8 +141,48 @@ the starter they would actually displace, in the same role. A brilliant forward
 is not a buy if your forwards are already better. Only genuine improvements are
 surfaced — ranking the whole market produces confident-looking noise.
 
-Selling is costed the same way. A substitute who never starts is free to sell; a
-player who does start is priced in points so the trade-off is explicit.
+**Ranking depends on whether cash is the constraint.** Points per million is
+right when funds bind and wrong when they do not: with 202M idle in a 210M
+budget and no yield whatsoever on cash, efficiency ranking put a 1.0M defender
+above every player who would actually improve the team. So the default is the
+biggest absolute upgrade affordable, and efficiency takes over only once the
+best candidate on the market is out of reach.
+
+**Bidding is priced, not accepted.** The asking price is the auction's floor, so
+offering it loses every contested listing by construction — the one bid ever
+placed through this app was an asking price. Each candidate now carries:
+
+- a **ceiling**: the most the player is worth to us, from the points they add
+  over the rest of the season (at the league's rate, zero here) plus what we
+  could recover on resale, bounded by funds and by Futmondo's offer ceiling;
+- a **bid**: the asking price plus a whole number of `increment` steps, read per
+  listing from `/1/market/playerauctionsummary` because an off-step offer may
+  be rejected outright.
+
+Both are shown, so the two-tap confirmation is an informed decision rather than
+a number to trust. The markup between the ask and the ceiling is a **stated
+placeholder**: the honest input is a clearing-price model fitted to what
+listings actually sold for, and the `transfers` ledger does not yet hold enough
+rows to fit one.
+
+Up to three bids are surfaced per report rather than one, with committed funds
+tracked: winning every proposed bid at once must stay inside
+`funds - withheld`, where `withheld` is what Futmondo already holds against our
+standing bids.
+
+**Our own listings** come from `/1/market/myplayers`, which is the only place a
+standing bid against us is visible — the bidder's identity is blanked, the price
+is not. A player already listed never produces a "sell him" recommendation, a
+bid closing inside the lineup window outranks any buy, and every sell figure is
+shown next to the `dspct` direct-sell floor (80% of value here) so "hold out for
+more" can be compared against "take this now, guaranteed". None of it is
+automated: accepting or cancelling moves money, and it is not even established
+whether a machine-market listing needs acceptance at all.
+
+Selling is costed in points. A substitute who never starts is free to sell; a
+player who does start is priced so the trade-off is explicit. Only a player who
+is genuinely `out` is ever called dead capital — a fitness doubt is a player who
+will most likely be available next week.
 
 Affordability uses Futmondo's own reported ceiling when it gives one, otherwise
 funds plus 50% of squad value, per the league settings.
@@ -119,16 +193,39 @@ funds plus 50% of squad value, per the league settings.
 cap and unlimited blocking**, which makes clauses the sharpest tool available in
 both directions.
 
+**Everything here is gated on the clause window.** `clause.date` is the instant
+a clause first becomes payable, and it is in the future more often than not.
+Before it, there is nothing to take and nothing to defend — ignoring it produced
+55 steal candidates and 15 block recommendations on a day when no clause in the
+league could be paid by anybody. The date is read from the payload, never
+derived: drafted players get acquisition + 5 days to the millisecond and bought
+players get end-of-local-day + 2, and reconciling those into a rule would be
+guessing about a decision that spends millions.
+
 **Attack.** A rival's player can be taken outright for their clause price — no
 bidding, no negotiation. Targets are ranked by lineup upgrade multiplied by
 points per million of clause, filtered to unlocked players we can actually
-afford. Clause price comes from `/1/player/summary`, one call per player, which
-is why it is collected in batches on a slower schedule.
+afford whose window is open. Targets whose window opens later are reported
+separately, as planning information rather than as advice. Clause price comes
+from `/1/player/summary`, one call per player, which is why it is collected in
+batches on a slower schedule; the same call supplies `suggestedClause`,
+Futmondo's own idea of a fair price, which is roughly half what owners set.
 
 **Defence.** Blocking costs nothing and removes a player from every rival's
-list. The app blocks players who are both attractively priced and affordable to
-at least one rival. Not using this is leaving the door open, and it is the half
-of the clause game most often left unplayed.
+list. The app blocks players who are attractively priced, affordable to at least
+one rival, and actually takeable today. When nothing is takeable yet it says
+when that changes, so the block happens before the window opens rather than
+after.
+
+**The app cannot see whether a block worked.** No Futmondo payload carries lock
+state anywhere, so the only record that a block exists is our own `action_log`,
+and `runClauses` reads it back to avoid re-blocking the same player daily. That
+is weaker than a reading — a rival's clause payment could clear a block with no
+trace here — and it is why every automated block is now stated explicitly in the
+Telegram report. A free, reversible, automated action that leaves no trace
+anywhere is indistinguishable from one that never ran, which is exactly the
+state this was in: fifteen players reported as needing a block, and not one lock
+row in the app's entire history.
 
 ## Rival funds, and why they are an estimate
 
@@ -161,9 +258,11 @@ threat, so this is what decides which of your players are worth blocking.
 1. An unavailable player in the XI — the most expensive mistake available.
 2. A lineup change inside 24 hours of the deadline.
 3. A player who has left the competition, because the loss compounds daily.
-4. A clause block, because it is free.
-5. A clause steal, weighted by the upgrade.
-6. A buy, then a sell.
+4. A bid standing against one of our own listings and closing soon, because it
+   expires rather than waiting for the next report.
+5. A clause block, because it is free.
+6. A clause steal, weighted by the upgrade.
+7. Up to three buys, then a sell.
 
 Anything that needs no action is deliberately not listed. Each entry carries the
 points at stake and the money involved, so the cost of ignoring it is visible.
@@ -209,16 +308,24 @@ is take the best offer.
 
 Futmondo's API only ever reports the present: today's value, today's clause,
 today's funds. Every edge in this app comes from comparing today with yesterday,
-so the app keeps its own record. **None of it can be backfilled later.**
+so the app keeps its own record. **Almost none of it can be backfilled later** —
+see the one exception below.
 
 | Table | What it enables |
 |---|---|
 | `player_snapshots` | Value trends, clause history, ownership over time |
-| `round_points` | Real form from actual per-round performance, with minutes |
+| `round_points` | Real form and a measured start record, per round |
 | `transfers`, `money_events` | Rival fund reconstruction |
 | `matches` + odds | Fixture difficulty |
 | `unavailability` | Injury history rather than only current state |
 | `probable_lineups` | Whether a doubtful player will start |
+
+**The exception is value.** `/1/player/summary` republishes a player's whole
+daily price series on every call, so a day the sync missed is recoverable for
+value alone. Those rows are marked `value_backfilled`, and a live capture always
+overwrites a reconstructed one. Points and ownership remain unrecoverable: a day
+the sync does not run is still a day of those lost permanently, which is why
+anything that could stop `syncDaily` is a high-severity bug.
 
 The UI states its own data coverage rather than hiding it: one day of snapshots
 is not a trend, and the app says so instead of presenting a confident number.
