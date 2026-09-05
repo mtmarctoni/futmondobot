@@ -58,6 +58,7 @@ function form(overrides: Partial<PlayerForm> = {}): PlayerForm {
     avgPoints: 8,
     avgMinutes: 90,
     rounds: 5,
+    measuredRounds: 0,
     startRate: 1,
     ...overrides,
   };
