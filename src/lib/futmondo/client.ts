@@ -3,6 +3,7 @@ import * as parse from "./parse";
 import { postEnvelope, sleep, type PostOptions } from "./transport";
 import type {
   ActiveChampionship,
+  AuctionSummary,
   ChampionshipConfiguration,
   ChampionshipTeam,
   CurrentLineup,
@@ -315,6 +316,12 @@ export class FutmondoClient {
     return parse.parseMarket(answer);
   }
 
+  /**
+   * Our own listings, **with the standing bids on them**. The daily market call
+   * does not show these, so without it the engine cannot tell that a player it
+   * is recommending we sell is already listed, nor that a bid on one of them
+   * expires inside the lineup window.
+   */
   async getMyListings(scope: Scope): Promise<MarketPlayer[]> {
     const answer = await this.call("/1/market/myplayers", {
       championshipId: scope.championshipId,
@@ -323,6 +330,26 @@ export class FutmondoClient {
     });
     return parse.parseMarket(answer);
   }
+
+  /**
+   * The auction state for one listing. `increment` is the minimum bid step, so
+   * this is what turns "bid the asking price" into a considered offer.
+   *
+   * Rejects a slug, and errors `market.playerAuctionSummary.needTeamId` without
+   * the team, so both ids are mandatory.
+   */
+  async getAuctionSummary(
+    scope: Scope,
+    playerId: string,
+  ): Promise<AuctionSummary | null> {
+    const answer = await this.call("/1/market/playerauctionsummary", {
+      championshipId: scope.championshipId,
+      userteamId: scope.userteamId,
+      player_id: playerId,
+    });
+    return parse.parseAuctionSummary(playerId, answer);
+  }
+
 
   /**
    * The only source of a player's clause price. One call per player, so callers

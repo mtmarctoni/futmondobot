@@ -7,16 +7,20 @@
  */
 import type {
   ActiveChampionship,
+  AuctionSummary,
   ChampionshipConfiguration,
   ChampionshipTeam,
   CurrentLineup,
   FutmondoRole,
   LineupSlot,
+  MarketBid,
   MarketPlayer,
   Match,
   MatchOdds,
   MoneyEvent,
   Player,
+  PlayerPricePoint,
+  PlayerRoundRecord,
   PlayerStats,
   PlayerSummary,
   RankedTeam,
@@ -211,6 +215,9 @@ function basePlayer(raw: Rec): Player | null {
     points: num(pick(raw, "points", "totalPoints", "seasonPoints")) ?? 0,
     average: avg(pick(raw, "average", "avg", "pointsAverage")),
     stats: parsePlayerStats(pick(raw, "average", "stats", "record")),
+    // Present on every roster and market row and never read until now. It is
+    // the only availability signal that reaches market listings at all.
+    status: str(pick(raw, "status")),
     slug: str(pick(raw, "slug", "player_slug")),
     photo: str(pick(raw, "photo", "image", "avatar")),
     raw,
@@ -294,10 +301,119 @@ export function parseMarket(answer: unknown): MarketPlayer[] {
       fromComputer: computer ?? !sellerTeamId,
       sellerTeamId,
       expiresAt: str(pick(raw, "expirationDate", "expiration", "expires")),
-      bids: num(pick(raw, "bids", "numBids", "offers")),
+      numberOfBids: bidCount(raw),
+      bids: parseBids(raw.bids),
     });
   }
   return out;
+}
+
+/**
+ * The bid count.
+ *
+ * The field is `numberOfBids`, not `bids`/`numBids`/`offers`, and its value is
+ * the string `"-"` when Futmondo hides it. Running the strict numeric
+ * conversion over the wrong key returned undefined for every listing that has
+ * ever been parsed. `"-"` maps to null explicitly rather than being swallowed,
+ * so "hidden" and "zero" stay distinguishable.
+ */
+function bidCount(raw: Rec): number | null {
+  const field = pick(raw, "numberOfBids", "numberofbids");
+  if (field === undefined) return null;
+  if (typeof field === "string" && field.trim() === "-") return null;
+  return num(field) ?? null;
+}
+
+/**
+ * Standing offers on a listing. Only `/1/market/myplayers` returns these, and
+ * only for our own listings: the bidder's team is blanked, so bids are sealed
+ * as to identity but not as to price.
+ */
+function parseBids(field: unknown): MarketBid[] | undefined {
+  if (!Array.isArray(field)) return undefined;
+  const out: MarketBid[] = [];
+  for (const entry of field) {
+    if (!isRec(entry)) continue;
+    const price = num(pick(entry, "price", "amount"));
+    if (price === undefined) continue;
+    const team = pick(entry, "userTeam", "userteam");
+    out.push({
+      id: str(pick(entry, "id", "_id")),
+      price,
+      bidderTeamName: isRec(team) ? str(pick(team, "name")) : undefined,
+    });
+  }
+  return out;
+}
+
+/**
+ * `/1/market/playerauctionsummary`. `increment` is the minimum bid step and is
+ * the direct answer to "how much should I bid"; it may scale with value, so it
+ * is read per candidate rather than assumed.
+ */
+export function parseAuctionSummary(
+  playerId: string,
+  answer: unknown,
+): AuctionSummary | null {
+  if (!isRec(answer)) return null;
+  return {
+    playerId,
+    increment: num(pick(answer, "increment", "step", "minIncrement")) ?? null,
+    numberOfBids: bidCount(answer),
+    raw: answer,
+  };
+}
+
+/**
+ * Per-round appearances from `/1/player/summary`'s `points[]`.
+ *
+ * This is the measured start record that `round_points` was supposed to hold
+ * and never did: `/1/userteam/roundlineup` returns an empty player list even
+ * for closed rounds. `initialLineUp` and `st` say the same thing two ways, so
+ * either alone is enough and disagreement resolves towards "started".
+ *
+ * `minutesPlayed` was 1 for every round of every player sampled, so it is kept
+ * as a flag and never treated as minutes.
+ */
+export function parsePlayerRounds(field: unknown): PlayerRoundRecord[] {
+  const out: PlayerRoundRecord[] = [];
+  for (const raw of asArray(field, "points")) {
+    const round = num(pick(raw, "round", "number", "matchday"));
+    if (round === undefined) continue;
+    const state = str(pick(raw, "st", "state"));
+    const flagged = bool(pick(raw, "initialLineUp", "initial_lineup"));
+    out.push({
+      round,
+      points: num(pick(raw, "points")) ?? 0,
+      initialLineUp: flagged ?? state?.toLowerCase() === "st",
+      state,
+      isHomeTeam: bool(pick(raw, "isHomeTeam", "is_home_team")),
+      minutesPlayed: num(pick(raw, "minutesPlayed", "mins_played")),
+    });
+  }
+  return out.sort((a, b) => a.round - b.round);
+}
+
+/**
+ * Daily value history from `/1/player/summary`'s `prices[]`.
+ *
+ * Reaches back further than our own snapshots do, which makes it the one
+ * exception to "history cannot be backfilled" — that rule holds for points and
+ * ownership, but value is republished in full on every call.
+ *
+ * The rows also carry `c` and `s`, whose meaning is not established. They are
+ * deliberately not parsed: storing a field we cannot name is how a wrong
+ * reading gets built on later.
+ */
+export function parsePlayerPrices(field: unknown): PlayerPricePoint[] {
+  const out: PlayerPricePoint[] = [];
+  for (const raw of asArray(field, "prices")) {
+    const date = str(pick(raw, "date", "d"));
+    const price = num(pick(raw, "price", "value", "p"));
+    if (!date || price === undefined) continue;
+    out.push({ date, price });
+  }
+  return out.sort((a, b) => a.date.localeCompare(b.date));
 }
 
 export function parsePlayerSummary(
@@ -308,12 +424,26 @@ export function parsePlayerSummary(
   const data = isRec(answer.data) ? answer.data : {};
   const championship = isRec(answer.championship) ? answer.championship : {};
   const clause = isRec(championship.clause) ? championship.clause : {};
+  const owner = isRec(championship.owner) ? championship.owner : {};
+
+  // The most recent owner entry is the current one. `d` is the acquisition
+  // instant, exact to the millisecond.
+  const owners = asArray(answer.owners, "owners");
+  const latestOwner = owners.length ? owners[owners.length - 1] : undefined;
 
   return {
     playerId,
     slug: str(pick(data, "slug", "player_slug")) ?? str(pick(answer, "slug")),
     clausePrice: num(pick(clause, "price", "value")),
+    clauseDate: str(pick(clause, "date")),
+    suggestedClause: num(pick(clause, "suggestedClause", "suggested")),
+    clauseTransferred: bool(pick(clause, "transferred")),
+    // Never present in any observed payload; see PlayerSummary.locked.
     locked: bool(pick(clause, "locked", "isLocked", "blocked")),
+    rounds: parsePlayerRounds(answer.points),
+    prices: parsePlayerPrices(answer.prices),
+    ownerTeamId: str(pick(owner, "_id", "id", "teamId")),
+    acquiredAt: latestOwner ? str(pick(latestOwner, "d", "date")) : undefined,
     raw: answer,
   };
 }
@@ -354,8 +484,11 @@ export function parseUserTeamInformation(answer: unknown): UserTeamInformation {
   const funds =
     num(pick(rec, "funds", "money", "budget", "availableMoney", "cash")) ?? 0;
   const teamValue = num(pick(rec, "teamValue", "value", "totalValue")) ?? 0;
+  // `withheld` is what the live payload actually calls the cash held by
+  // standing bids. Without it the allocator would happily propose spending the
+  // same euro twice.
   const reserved =
-    num(pick(rec, "reserved", "retained", "blockedMoney", "bidsMoney")) ?? 0;
+    num(pick(rec, "withheld", "reserved", "retained", "blockedMoney", "bidsMoney")) ?? 0;
 
   return {
     funds,
@@ -740,23 +873,51 @@ export function parseOdds(matchId: string, answer: unknown): MatchOdds | null {
 
 // --------------------------------------------------------------- config ------
 
+/**
+ * The league's own settings.
+ *
+ * The keys are flat and terse and there is no `bonus` object: the real names
+ * are `moneyPerPoint`, `moneyPerRanking`, `numberOfPlayers`, `dspct`, `mnmp`,
+ * `enablingClause`. Looking for `perPoint` inside a wrapper that does not exist
+ * found nothing, so `pointBonus` was permanently undefined and the engine fell
+ * through to a hardcoded 60.000€ per point — in a league whose `moneyPerPoint`
+ * is 0. Every prize-money sentence the app has ever printed was fabricated by
+ * that one missed key.
+ *
+ * The values appear twice, at the top level and again inside a `configuration`
+ * object, with the same content. The nested copy is preferred and the top level
+ * is the fallback, so either shape works.
+ */
 export function parseChampionshipConfiguration(
   answer: unknown,
 ): ChampionshipConfiguration {
-  const rec = isRec(answer) ? answer : {};
-  const market = isRec(rec.market) ? rec.market : rec;
-  const bonus = isRec(rec.bonus) ? rec.bonus : isRec(rec.awards) ? rec.awards : rec;
+  const outer = isRec(answer) ? answer : {};
+  const nested = isRec(outer.configuration) ? outer.configuration : {};
+  /** Reads from the nested configuration first, then the top level. */
+  const get = (...keys: string[]): unknown => {
+    const inner = pick(nested, ...keys);
+    return inner !== undefined ? inner : pick(outer, ...keys);
+  };
 
   return {
-    budget: num(pick(rec, "budget", "initialBudget", "money")),
-    initialPlayers: num(pick(rec, "initialPlayers", "numInitialPlayers")),
-    maxUsers: num(pick(rec, "maxUsers", "maxUsersNumber")),
-    pointBonus: num(pick(bonus, "perPoint", "point", "pointPrize")),
-    allowCaptain: bool(pick(rec, "allowCaptain", "captain")),
-    allowMultiposition: bool(pick(rec, "allowMultiposition", "multiposition")),
-    marketPlayers: num(pick(market, "players", "marketPlayers", "numPlayers")),
-    bidDurationDays: num(pick(market, "bidDuration", "offerDuration", "duration")),
-    automaticClauses: bool(pick(market, "automaticClauses", "autoClauses")),
-    raw: rec,
+    budget: num(get("budget", "initialBudget", "money")),
+    initialPlayers: num(get("numberOfPlayers", "initialPlayers", "numInitialPlayers")),
+    maxUsers: num(get("maxUserteams", "maxUsers", "maxUsersNumber")),
+    // Zero is a real answer here and must survive: `num` returns 0, and every
+    // consumer treats 0 as "this league does not pay for points".
+    pointBonus: num(get("moneyPerPoint", "perPoint", "pointPrize")),
+    rankingBonus: num(get("moneyPerRanking", "perRanking")),
+    rankingMode: str(get("rankingMode")),
+    usersToRank: num(get("usersToRank")),
+    allowCaptain: bool(get("allowCaptain", "captain")),
+    allowMultiposition: bool(get("allowMultiposition", "multiposition")),
+    marketPlayers: num(get("marketPlayers", "numPlayers")),
+    bidDurationDays: num(get("bidDuration", "offerDuration")),
+    clauseWindowDays: num(get("enablingClause")),
+    directSellShare: num(get("dspct")),
+    minListingShare: num(get("mnmp")),
+    automaticClauses: bool(get("enableAutomaticClauses", "automaticClauses")),
+    clauseBlockingEnabled: bool(get("blc")),
+    raw: outer,
   };
 }
