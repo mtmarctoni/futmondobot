@@ -29,6 +29,7 @@ function player(
     fixtureDifficulty: 0.5,
     nextOpponent: null,
     unavailableReason: null,
+    availability: "fit",
     valueDelta: 0,
     sampleRounds: 5,
     expectedPoints,
@@ -36,6 +37,10 @@ function player(
     ownerTeamId: "me",
     clausePrice: null,
     clauseLocked: null,
+    clauseDate: null,
+    suggestedClause: null,
+    onMarket: false,
+    askPrice: null,
     notes: [],
     ...overrides,
   };
@@ -134,12 +139,12 @@ describe("pickLineup", () => {
     expect(pick.starters).toHaveLength(11);
   });
 
-  it("prefers a fit player over an injured one with a better projection", () => {
+  it("leaves out a player who cannot play, because he projects nothing", () => {
     const squad = [
       player("gk1", "POR", 5),
       ...Array.from({ length: 3 }, (_, i) => player(`d${i}`, "DEF", 4)),
       ...Array.from({ length: 4 }, (_, i) => player(`m${i}`, "MED", 4)),
-      player("star", "DEL", 9, { unavailableReason: "injured" }),
+      player("star", "DEL", 0, { unavailableReason: "injured", availability: "out" }),
       player("fit1", "DEL", 3),
       player("fit2", "DEL", 3),
       player("fit3", "DEL", 3),
@@ -156,7 +161,7 @@ describe("pickLineup", () => {
       player("gk1", "POR", 5),
       ...Array.from({ length: 3 }, (_, i) => player(`d${i}`, "DEF", 4)),
       ...Array.from({ length: 4 }, (_, i) => player(`m${i}`, "MED", 4)),
-      player("hurt", "DEL", 2, { unavailableReason: "injured" }),
+      player("hurt", "DEL", 0, { unavailableReason: "injured", availability: "out" }),
       player("fit1", "DEL", 3),
       player("fit2", "DEL", 3),
     ];
@@ -197,8 +202,8 @@ describe("pickLineup", () => {
     expect(pick.starters).toHaveLength(11);
   });
 
-  it("benches the best players left over, excluding the unfit", () => {
-    const squad = [...fullSquad(), player("hurt", "MED", 9, { unavailableReason: "injured" })];
+  it("benches the fit players left over and reports the unfit separately", () => {
+    const squad = [...fullSquad(), player("hurt", "MED", 0, { unavailableReason: "injured", availability: "out" })];
     const pick = pickLineup(squad, [{ label: "4-4-2", DEF: 4, MED: 4, DEL: 2 }]);
     expect(pick.bench.every((p) => !p.unavailableReason)).toBe(true);
     expect(pick.excluded.map((p) => p.playerId)).toContain("hurt");
@@ -231,7 +236,7 @@ describe("diffLineup", () => {
       player("gk1", "POR", 5),
       ...Array.from({ length: 4 }, (_, i) => player(`d${i}`, "DEF", 4)),
       ...Array.from({ length: 4 }, (_, i) => player(`m${i}`, "MED", 4)),
-      player("hurt", "DEL", 6, { unavailableReason: "injured" }),
+      player("hurt", "DEL", 0, { unavailableReason: "injured", availability: "out" }),
       player("fit1", "DEL", 3),
       player("fit2", "DEL", 3),
     ];
@@ -258,5 +263,76 @@ describe("diffLineup", () => {
     for (let i = 1; i < changes.length; i += 1) {
       expect(changes[i - 1].gain).toBeGreaterThanOrEqual(changes[i].gain);
     }
+  });
+});
+
+/**
+ * The regression this block exists for.
+ *
+ * Three of the fifteen real players were flagged `doubt` on 2026-09-04 and all
+ * three were dropped, leaving POR 2 / DEF 4 / MED 4 / DEL 1 -- ten outfield
+ * players for eleven shirts. No formation could be filled, so the picker took
+ * the least-bad incomplete shape and fielded a body it scored at 0.0.
+ */
+describe("pickLineup with fitness doubts", () => {
+  it("fields a doubtful player rather than leaving the shape short", () => {
+    const squad = [
+      player("gk", "POR", 4.6),
+      player("d1", "DEF", 4.6),
+      player("d2", "DEF", 3.1),
+      player("d3", "DEF", 1.3),
+      player("d4", "DEF", 0.7),
+      player("m1", "MED", 5.0),
+      player("m2", "MED", 4.0),
+      player("m3", "MED", 2.8),
+      player("m4", "MED", 2.1),
+      player("f1", "DEL", 3.6),
+      // Vargas: a 17M starting forward flagged `doubt`, whose projection is
+      // discounted rather than deleted.
+      player("f2", "DEL", 2.4, {
+        unavailableReason: "doubt",
+        availability: "doubt",
+      }),
+    ];
+
+    const pick = pickLineup(squad, [{ label: "4-4-2", DEF: 4, MED: 4, DEL: 2 }]);
+
+    expect(pick.incomplete).toBe(false);
+    expect(pick.starters).toHaveLength(11);
+    expect(pick.starters.map((p) => p.playerId)).toContain("f2");
+    expect(pick.starters.every((p) => p.expectedPoints > 0)).toBe(true);
+  });
+
+  it("prefers a doubtful player who projects better than a fit one", () => {
+    const squad = [
+      player("gk", "POR", 4),
+      ...Array.from({ length: 4 }, (_, i) => player(`d${i}`, "DEF", 4)),
+      ...Array.from({ length: 4 }, (_, i) => player(`m${i}`, "MED", 4)),
+      player("good", "DEL", 4, { unavailableReason: "doubt", availability: "doubt" }),
+      player("poor", "DEL", 1),
+      player("spare", "DEL", 0.5),
+    ];
+
+    const pick = pickLineup(squad, [{ label: "4-4-2", DEF: 4, MED: 4, DEL: 2 }]);
+    expect(pick.starters.map((p) => p.playerId)).toContain("good");
+    expect(pick.summary).toMatch(/fitness doubt/);
+  });
+
+  it("counts a doubt as excluded only when he is actually left out", () => {
+    const squad = [
+      player("gk", "POR", 4),
+      ...Array.from({ length: 4 }, (_, i) => player(`d${i}`, "DEF", 4)),
+      ...Array.from({ length: 4 }, (_, i) => player(`m${i}`, "MED", 4)),
+      player("f1", "DEL", 6),
+      player("f2", "DEL", 5),
+      player("weak", "DEL", 0.5, {
+        unavailableReason: "doubt",
+        availability: "doubt",
+      }),
+    ];
+
+    const pick = pickLineup(squad, [{ label: "4-4-2", DEF: 4, MED: 4, DEL: 2 }]);
+    expect(pick.excluded.map((p) => p.playerId)).toEqual(["weak"]);
+    expect(pick.bench.every((p) => p.availability === "fit")).toBe(true);
   });
 });

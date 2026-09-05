@@ -16,6 +16,12 @@ import { dbTokenStore } from "../db/token-store";
 import { FutmondoClient, type Scope } from "../futmondo/client";
 import { FutmondoError } from "../futmondo/errors";
 import type { FutmondoRole, PlayerStats } from "../futmondo/types";
+import {
+  classify,
+  classifyAll,
+  mergeAvailability,
+  type Unavailability,
+} from "./availability";
 import { runClauses, type ClauseReport } from "./clauses";
 import { scanDepartures, type DepartedPlayer } from "./departed";
 import { evaluate, type EvaluateContext } from "./expected";
@@ -95,6 +101,11 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
   }
 
   // ---------------------------------------------------------------- rules --
+  // Every money sentence in the app depends on getting these right, and the
+  // failure mode is silent: a missed key reads as "not configured" and falls
+  // through to a default that is simply invented. `pointBonus` of 0 is a real
+  // answer and must survive `??`, which is why each field is tested for
+  // undefined rather than falsiness.
   let rules = DEFAULT_RULES;
   try {
     const config = await client.getChampionshipConfiguration(scope.championshipId);
@@ -102,21 +113,38 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
       budget: config.budget ?? DEFAULT_RULES.budget,
       initialPlayers: config.initialPlayers ?? DEFAULT_RULES.initialPlayers,
       pricePerPoint: config.pointBonus ?? DEFAULT_RULES.pricePerPoint,
+      pricePerRanking: config.rankingBonus ?? DEFAULT_RULES.pricePerRanking,
+      rankingMode: config.rankingMode ?? null,
       maxOfferTeamValueShare: DEFAULT_RULES.maxOfferTeamValueShare,
+      directSellShare: config.directSellShare ?? null,
+      minListingShare: config.minListingShare ?? null,
+      clauseWindowDays: config.clauseWindowDays ?? null,
+      bidDurationDays: config.bidDurationDays ?? null,
+      marketPlayers: config.marketPlayers ?? null,
     };
   } catch (err) {
     warnings.push(`League settings unavailable, using defaults: ${describe(err)}`);
   }
 
   // ----------------------------------------------------------------- live --
-  const [infoResult, rosterResult, marketResult, lineupResult, strategyResult] =
-    await Promise.allSettled([
-      client.getUserTeamInformation(scope),
-      client.getRoster(scope.championshipId, scope.userteamId),
-      client.getMarket(scope),
-      client.getCurrentLineup(scope),
-      client.getAvailableStrategies(scope.championshipId),
-    ]);
+  const [
+    infoResult,
+    rosterResult,
+    marketResult,
+    lineupResult,
+    strategyResult,
+    myListingsResult,
+  ] = await Promise.allSettled([
+    client.getUserTeamInformation(scope),
+    client.getRoster(scope.championshipId, scope.userteamId),
+    client.getMarket(scope),
+    client.getCurrentLineup(scope),
+    client.getAvailableStrategies(scope.championshipId),
+    // Our own listings, with the bids standing on them. Without this the
+    // engine recommends selling players who are already listed and cannot see
+    // an offer expiring inside the lineup window.
+    client.getMyListings(scope),
+  ]);
 
   const info =
     infoResult.status === "fulfilled"
@@ -140,6 +168,12 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
     lineupResult.status === "fulfilled" ? lineupResult.value : null;
   if (lineupResult.status === "rejected") {
     warnings.push(`Current lineup unavailable: ${describe(lineupResult.reason)}`);
+  }
+
+  const myListings =
+    myListingsResult.status === "fulfilled" ? myListingsResult.value : [];
+  if (myListingsResult.status === "rejected") {
+    warnings.push(`Your own listings unavailable: ${describe(myListingsResult.reason)}`);
   }
 
   const availableFormations =
@@ -189,10 +223,31 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
   );
   warnings.push(...departures.warnings);
 
-  // A departure is the stronger fact, so it wins over a stored injury note.
-  const unavailable = new Map(history.unavailable);
+  // Three sources, deliberately merged rather than ranked by recency:
+  //
+  //   - the per-club injury endpoint, which names the reason most precisely;
+  //   - the `status` field on every roster and market row, which costs no extra
+  //     call and reaches market listings the club endpoint never sees;
+  //   - the departure scan, which is the strongest fact of all and always wins.
+  //
+  // The merge keeps the more severe reading, so an "ok" on a roster row cannot
+  // clear an injury the club has reported.
+  const statuses = new Map<string, Unavailability>();
+  for (const p of [...roster, ...listings, ...myListings]) {
+    const graded = classify(p.status);
+    if (graded) statuses.set(p.id, graded);
+  }
+  for (const row of history.ownership) {
+    const graded = classify(row.status);
+    if (graded && !statuses.has(row.playerId)) statuses.set(row.playerId, graded);
+  }
+
+  const unavailable = mergeAvailability(
+    classifyAll(history.unavailable),
+    statuses,
+  );
   for (const [playerId, reason] of departures.reasons) {
-    unavailable.set(playerId, reason);
+    unavailable.set(playerId, { reason, severity: "out", multiplier: 0 });
   }
 
   // ------------------------------------------------------------ evaluate ---
@@ -219,6 +274,12 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
         // Prefer the stored clause: the roster payload rarely carries one.
         clausePrice: p.clause ?? history.clauseById.get(p.id) ?? null,
         clauseLocked: p.locked ?? history.lockedById.get(p.id) ?? null,
+        // Only the per-player summary carries these, so they always come from
+        // history rather than from the roster read.
+        clauseDate: history.clauseDateById.get(p.id) ?? null,
+        suggestedClause: history.suggestedClauseById.get(p.id) ?? null,
+        onMarket: p.onMarket ?? false,
+        askPrice: p.askPrice ?? null,
         stats: p.stats,
       },
       ctx,
@@ -249,6 +310,10 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
             ownerTeamId: row.ownerTeamId,
             clausePrice: row.clausePrice,
             clauseLocked: row.locked,
+            clauseDate: row.clauseDate,
+            suggestedClause: row.suggestedClause,
+            onMarket: row.onMarket ?? false,
+            askPrice: row.askPrice,
             stats: statsFromOwnership(row),
           },
           ctx,
@@ -267,6 +332,19 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
 
   // -------------------------------------------------------------- market ---
   const evaluatedById = new Map(allPlayers.map((p) => [p.playerId, p]));
+
+  // The minimum bid step, per listing. It decides what a considered bid looks
+  // like -- an off-step offer may be rejected outright -- and it may scale with
+  // value, so it is read rather than assumed. One extra call per listing, only
+  // for players we might actually bid on, and a failure just falls back to the
+  // observed default.
+  const increments = await readIncrements(
+    client,
+    scope,
+    listings.map((l) => l.id),
+    warnings,
+  );
+
   const marketReport = runMarket({
     listings: listings.map((listing) => {
       const known = evaluatedById.get(listing.id);
@@ -289,7 +367,11 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
           },
           ctx,
         );
-      return { player, price: listing.price };
+      return {
+        player,
+        price: listing.price,
+        increment: increments.get(listing.id),
+      };
     }),
     squad,
     starterIds,
@@ -297,6 +379,16 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
     teamValue: info.teamValue,
     rules,
     reportedMaxBid: info.maxBid,
+    committed: info.reserved,
+    ownListings: myListings.map((l) => ({
+      playerId: l.id,
+      name: l.name,
+      price: l.price,
+      value: l.value,
+      expiresAt: l.expiresAt,
+      bids: l.bids?.map((b) => ({ price: b.price })),
+    })),
+    now: options.now,
   });
 
   // ------------------------------------------------------------- clauses ---
@@ -310,6 +402,8 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
     rules,
     rivalFunds: history.rivalFunds,
     teamNames: history.teamNames,
+    lockedPlayerIds: history.lockedPlayerIds,
+    now: options.now,
   });
 
   // --------------------------------------------------------------- today ---
@@ -347,6 +441,41 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
   };
 }
 
+/**
+ * Minimum bid steps for today's listings.
+ *
+ * Bounded, because this is one call per listing on top of everything else the
+ * report already does, and a market of a dozen machine listings is the normal
+ * case. A listing we could not read simply falls back to the observed default
+ * step rather than failing the section.
+ */
+const INCREMENT_LOOKUP_LIMIT = 12;
+
+async function readIncrements(
+  client: FutmondoClient,
+  scope: Scope,
+  playerIds: string[],
+  warnings: string[],
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  let failures = 0;
+
+  for (const playerId of playerIds.slice(0, INCREMENT_LOOKUP_LIMIT)) {
+    try {
+      const summary = await client.getAuctionSummary(scope, playerId);
+      if (summary?.increment) out.set(playerId, summary.increment);
+    } catch {
+      failures += 1;
+    }
+  }
+  if (failures > 0) {
+    warnings.push(
+      `Could not read the minimum bid step for ${failures} listing(s); using the default step for those.`,
+    );
+  }
+  return out;
+}
+
 type OwnershipRow = Awaited<ReturnType<typeof repo.getLatestOwnership>>[number];
 
 /**
@@ -376,6 +505,7 @@ interface History {
   form: Map<string, repo.PlayerForm>;
   trends: Map<string, repo.ValueTrend>;
   difficulty: repo.FixtureMap;
+  /** Raw reason strings; graded once, in runAnalysis, alongside the other sources. */
   unavailable: Map<string, string>;
   startProbabilities: Map<string, number>;
   /** Real clubs with a fixture, id to name. The competition's own membership. */
@@ -385,7 +515,11 @@ interface History {
   teamNames: Map<string, string | null>;
   nextRound: repo.RoundRow | null;
   clauseById: Map<string, number>;
+  clauseDateById: Map<string, string>;
+  suggestedClauseById: Map<string, number>;
   lockedById: Map<string, boolean>;
+  /** Players our own audit log says we have blocked. See ClauseContext. */
+  lockedPlayerIds: Set<string>;
   coverage: Coverage;
   warnings: string[];
 }
@@ -403,7 +537,10 @@ function emptyHistory(warnings: string[]): History {
     teamNames: new Map(),
     nextRound: null,
     clauseById: new Map(),
+    clauseDateById: new Map(),
+    suggestedClauseById: new Map(),
     lockedById: new Map(),
+    lockedPlayerIds: new Set(),
     coverage: {
       hasDatabase: false,
       snapshotDays: 0,
@@ -471,6 +608,15 @@ async function loadHistory(): Promise<History> {
     "rival funds",
   );
 
+  // No payload carries clause-lock state, so our own audit log is the only
+  // record that a block exists. See ClauseContext.lockedPlayerIds and OPEN-7.
+  const lockedPlayerIds = await safe(
+    () => repo.getLockedPlayerIds(),
+    new Set<string>(),
+    warnings,
+    "clause blocks",
+  );
+
   const coverage = await safe(
     () => loadCoverage(),
     emptyHistory([]).coverage,
@@ -486,12 +632,13 @@ async function loadHistory(): Promise<History> {
     );
   }
   if (coverage.roundsWithPoints === 0) {
-    // Not a fallback to role averages any more: the scoring record on every
-    // roster payload carries the per-player evidence. What is missing is real
-    // minutes, which is the difference between "did not start" and "started
-    // and was substituted early" -- so the start estimate is the coarse part.
+    // The measured start record comes from /1/player/summary's points[], which
+    // the summary sweep collects. Until it has run, start probability falls
+    // back to the share of rounds a player appeared in -- which cannot tell a
+    // starter from a substitute, and that is the largest term in every
+    // projection.
     warnings.push(
-      "No per-round minutes stored, so how often a player starts is estimated from rounds appeared in rather than measured.",
+      "No per-round start records stored yet, so how often a player starts is estimated from rounds appeared in rather than measured. Run the clause sync.",
     );
   }
   if (!coverage.hasOdds) {
@@ -521,11 +668,22 @@ async function loadHistory(): Promise<History> {
         .filter((o) => o.clausePrice !== null)
         .map((o) => [o.playerId, o.clausePrice as number]),
     ),
+    clauseDateById: new Map(
+      ownership
+        .filter((o) => o.clauseDate !== null)
+        .map((o) => [o.playerId, o.clauseDate as string]),
+    ),
+    suggestedClauseById: new Map(
+      ownership
+        .filter((o) => o.suggestedClause !== null)
+        .map((o) => [o.playerId, o.suggestedClause as number]),
+    ),
     lockedById: new Map(
       ownership
         .filter((o) => o.locked !== null)
         .map((o) => [o.playerId, o.locked as boolean]),
     ),
+    lockedPlayerIds,
     coverage,
     warnings,
   };

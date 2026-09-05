@@ -98,9 +98,18 @@ function byExpected(a: Evaluated, b: Evaluated): number {
 /**
  * Best XI over every supplied formation.
  *
- * An unavailable player is never selected while a fit replacement exists, but
- * is used to fill an otherwise empty slot: Futmondo scores an incomplete
- * lineup as zero for the missing places, so an injured body still beats a gap.
+ * Selection is on expected points alone. It used to partition each role into
+ * "fit" and "sidelined" and only reach for the second group as filler, which
+ * was right while availability was a boolean and is actively harmful now that
+ * it is graded: a player carrying a fitness doubt already has that doubt priced
+ * into their projection, and sorting them behind every fit player double-counts
+ * it. With three doubts in a fifteen-player squad that left ten fit outfield
+ * players for eleven shirts, so no shape could be filled and a 0.0 body was
+ * fielded.
+ *
+ * `out` players still sink to the bottom on their own, because a zero start
+ * probability makes their expected points zero -- and Futmondo scores an empty
+ * slot as zero too, so an unavailable body is still better than a gap.
  */
 export function pickLineup(
   squad: Evaluated[],
@@ -125,14 +134,10 @@ export function pickLineup(
 
   const byRole = new Map<FutmondoRole, Evaluated[]>();
   for (const roleName of ["POR", "DEF", "MED", "DEL"] as FutmondoRole[]) {
-    const available = squad
-      .filter((p) => p.role === roleName && !p.unavailableReason)
-      .sort(byExpected);
-    const sidelined = squad
-      .filter((p) => p.role === roleName && p.unavailableReason)
-      .sort(byExpected);
-    // Fit players first, then the sidelined ones as last resort filler.
-    byRole.set(roleName, [...available, ...sidelined]);
+    byRole.set(
+      roleName,
+      squad.filter((p) => p.role === roleName).sort(byExpected),
+    );
   }
 
   let best: LineupPick | null = null;
@@ -175,9 +180,12 @@ export function pickLineup(
       best = {
         formation,
         starters,
-        bench: rest.filter((p) => !p.unavailableReason).slice(0, BENCH_SIZE),
+        // Excluded is now a statement about availability, not about selection:
+        // a player left out purely because someone projects better belongs on
+        // the bench, and only an availability problem is worth reporting.
+        bench: rest.filter((p) => p.availability === "fit").slice(0, BENCH_SIZE),
         expectedPoints,
-        excluded: rest.filter((p) => p.unavailableReason),
+        excluded: rest.filter((p) => p.availability !== "fit"),
         incomplete,
         shortfall,
         summary: "",
@@ -209,10 +217,18 @@ function describe(pick: LineupPick): string {
       .join(", ");
     return `Best available is ${pick.formation.label} but the squad is short of ${gaps}.`;
   }
-  const sidelined = pick.starters.filter((p) => p.unavailableReason);
   const base = `${pick.formation.label}, ${pick.expectedPoints.toFixed(1)} expected points`;
-  if (sidelined.length > 0) {
-    return `${base}. ${sidelined.length} unfit player${sidelined.length > 1 ? "s" : ""} fielded because there is no replacement.`;
+
+  // Only a certain absence is worth calling out. A doubt in the XI is a normal
+  // selection whose projection is already discounted, and announcing it as an
+  // emergency would undo the point of grading availability at all.
+  const out = pick.starters.filter((p) => p.availability === "out");
+  if (out.length > 0) {
+    return `${base}. ${out.length} unfit player${out.length > 1 ? "s" : ""} fielded because there is no replacement.`;
+  }
+  const doubtful = pick.starters.filter((p) => p.availability === "doubt");
+  if (doubtful.length > 0) {
+    return `${base}. ${doubtful.length} carrying a fitness doubt.`;
   }
   return `${base}.`;
 }
@@ -246,9 +262,12 @@ export function diffLineup(
     const playerIn = comingIn[i];
     const playerOut = goingOut[i];
     const gain = playerIn.expectedPoints - playerOut.expectedPoints;
-    const reason = playerOut.unavailableReason
-      ? `${playerOut.name} is ${playerOut.unavailableReason}`
-      : `${playerIn.name} projects ${gain.toFixed(1)} more points`;
+    // Only a certain absence explains a change on its own. A doubt is priced
+    // into the projection, so the honest reason for that swap is the points.
+    const reason =
+      playerOut.availability === "out" && playerOut.unavailableReason
+        ? `${playerOut.name} is ${playerOut.unavailableReason}`
+        : `${playerIn.name} projects ${gain.toFixed(1)} more points`;
     changes.push({ playerIn, playerOut, gain, reason });
   }
 

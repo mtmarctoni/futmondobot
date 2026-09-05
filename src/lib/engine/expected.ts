@@ -19,6 +19,11 @@
  */
 import type { FutmondoRole, PlayerStats } from "../futmondo/types";
 import type { FixtureOutlook, PlayerForm, ValueTrend } from "../db/repo";
+import {
+  describeAvailability,
+  type Availability,
+  type Unavailability,
+} from "./availability";
 import { clamp, millions, type Evaluated } from "./types";
 
 /**
@@ -138,21 +143,34 @@ export function observedPointsPerStart(
 }
 
 /**
- * Chance the player starts. A scraped probable lineup is the best signal;
- * failing that, the share of rounds they have actually appeared in; failing
- * that, a coin flip, since we genuinely do not know.
+ * Chance the player starts, before availability is taken into account.
+ *
+ * A scraped probable lineup is the best signal; failing that, a measured start
+ * record from `points[].initialLineUp`; failing that, the share of rounds they
+ * have actually appeared in; failing that, a coin flip, since we genuinely do
+ * not know.
  */
-export function startProbability(args: {
+function baseStartProbability(args: {
   scraped: number | undefined;
+  measuredStartRate: number | null;
+  measuredRounds: number;
   startRate: number | null;
   rounds: number;
-  unavailable: boolean;
 }): { probability: number; basis: string } {
-  if (args.unavailable) return { probability: 0, basis: "injured or suspended" };
   if (args.scraped !== undefined) {
     return {
       probability: clamp(args.scraped, 0, 1),
       basis: `probable XI ${Math.round(clamp(args.scraped, 0, 1) * 100)}%`,
+    };
+  }
+  // A measured start record beats an appearance share: it distinguishes a
+  // player who starts every week from one who comes off the bench every week,
+  // and those two score very differently.
+  if (args.measuredStartRate !== null && args.measuredRounds > 0) {
+    const weight = args.measuredRounds / (args.measuredRounds + PRIOR_WEIGHT_ROUNDS);
+    return {
+      probability: clamp(weight * args.measuredStartRate + (1 - weight) * 0.5, 0, 1),
+      basis: `started ${Math.round(args.measuredStartRate * 100)}% of ${args.measuredRounds} rounds`,
     };
   }
   if (args.startRate !== null && args.rounds > 0) {
@@ -167,6 +185,41 @@ export function startProbability(args: {
   return { probability: 0.5, basis: "no appearances yet" };
 }
 
+/**
+ * Chance the player starts, with availability folded in as a multiplier rather
+ * than as an override.
+ *
+ * The multiplier is what makes a fitness doubt cost a fraction of a projection
+ * instead of all of it. Overwriting the probability threw away everything known
+ * about the player -- see `availability.ts` for what that cost.
+ */
+export function startProbability(args: {
+  scraped: number | undefined;
+  measuredStartRate?: number | null;
+  measuredRounds?: number;
+  startRate: number | null;
+  rounds: number;
+  /** 0 for a certain absence, 1 for fully fit, between for a doubt. */
+  availabilityMultiplier: number;
+}): { probability: number; basis: string } {
+  const multiplier = clamp(args.availabilityMultiplier, 0, 1);
+  if (multiplier <= 0) return { probability: 0, basis: "injured or suspended" };
+
+  const base = baseStartProbability({
+    scraped: args.scraped,
+    measuredStartRate: args.measuredStartRate ?? null,
+    measuredRounds: args.measuredRounds ?? 0,
+    startRate: args.startRate,
+    rounds: args.rounds,
+  });
+  if (multiplier >= 1) return base;
+
+  return {
+    probability: clamp(base.probability * multiplier, 0, 1),
+    basis: `${base.basis}, discounted for a fitness doubt`,
+  };
+}
+
 export interface EvaluateInput {
   playerId: string;
   name: string;
@@ -179,6 +232,11 @@ export interface EvaluateInput {
   ownerTeamId: string | null;
   clausePrice: number | null;
   clauseLocked: boolean | null;
+  /** When the clause first becomes payable, ISO 8601. */
+  clauseDate?: string | null;
+  suggestedClause?: number | null;
+  onMarket?: boolean;
+  askPrice?: number | null;
   /** The scoring record, when the payload or a snapshot carried one. */
   stats?: PlayerStats;
 }
@@ -188,7 +246,12 @@ export interface EvaluateContext {
   trends: Map<string, ValueTrend>;
   /** Keyed by real club id. */
   difficulty: Map<string, FixtureOutlook>;
-  unavailable: Map<string, string>;
+  /**
+   * Graded availability, keyed by player id. Absent means fit. Grading rather
+   * than a bare reason string is what lets a fitness doubt cost a fraction of
+   * a projection instead of the whole player.
+   */
+  unavailable: Map<string, Unavailability>;
   startProbabilities: Map<string, number>;
 }
 
@@ -223,12 +286,17 @@ export function evaluate(
 
   const pointsPerStart = shrinkPointsPerStart(input.role, observed, rounds);
 
-  const unavailableReason = ctx.unavailable.get(input.playerId) ?? null;
+  const graded = ctx.unavailable.get(input.playerId) ?? null;
+  const unavailableReason = graded?.reason ?? null;
+  const availability: Availability = graded?.severity ?? "fit";
+
   const { probability, basis } = startProbability({
     scraped: ctx.startProbabilities.get(input.playerId),
+    measuredStartRate: form && form.measuredRounds > 0 ? form.startRate : null,
+    measuredRounds: form?.measuredRounds ?? 0,
     startRate,
     rounds: stats?.fitness.length ?? rounds,
-    unavailable: unavailableReason !== null,
+    availabilityMultiplier: graded?.multiplier ?? 1,
   });
 
   const expectedPoints = probability * pointsPerStart * fixtureFactor(difficulty);
@@ -236,8 +304,14 @@ export function evaluate(
   const trend = ctx.trends.get(input.playerId);
   const valueDelta = trend?.delta ?? 0;
 
-  if (unavailableReason) notes.push(unavailableReason);
-  else notes.push(basis);
+  // A doubt still gets the basis alongside it: the number is now a discounted
+  // projection rather than a zero, and the reader needs to see both halves.
+  if (graded) {
+    notes.push(describeAvailability(graded));
+    if (graded.severity !== "out") notes.push(basis);
+  } else {
+    notes.push(basis);
+  }
 
   if (rounds === 0) {
     notes.push("no scoring record yet");
@@ -276,6 +350,7 @@ export function evaluate(
     fixtureDifficulty: difficulty,
     nextOpponent: fixture?.opponent ?? null,
     unavailableReason,
+    availability,
     valueDelta,
     sampleRounds: rounds,
     expectedPoints,
@@ -283,6 +358,10 @@ export function evaluate(
     ownerTeamId: input.ownerTeamId,
     clausePrice: input.clausePrice,
     clauseLocked: input.clauseLocked,
+    clauseDate: input.clauseDate ?? null,
+    suggestedClause: input.suggestedClause ?? null,
+    onMarket: input.onMarket ?? false,
+    askPrice: input.askPrice ?? null,
     notes,
   };
 }
