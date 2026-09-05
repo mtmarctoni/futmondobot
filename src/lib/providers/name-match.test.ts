@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { NameMatcher, normalizeName, type Candidate } from "./name-match";
+import {
+  NameMatcher,
+  normalizeName,
+  significantTokens,
+  type Candidate,
+} from "./name-match";
 
 const SQUAD: Candidate[] = [
   { playerId: "p1", name: "Antonio Martínez", teamName: "Alavés" },
@@ -98,5 +103,79 @@ describe("NameMatcher", () => {
     const matcher = new NameMatcher(SQUAD);
     // "de" must not match "de Jong" via a two-letter token.
     expect(matcher.match("Jong", "Barcelona")?.playerId).toBe("p3");
+  });
+});
+
+/**
+ * The thirty-eight names that never matched.
+ *
+ * `{scraped: 67, matched: 19, lowConfidenceDropped: 10}` — a 28% hit rate on
+ * ordinary names, which is a matcher problem rather than a data problem. Each
+ * case below is one of the real failures, with the Futmondo spelling on the
+ * left and the scraped spelling on the right.
+ */
+describe("NameMatcher against the real failures", () => {
+  const REAL: Candidate[] = [
+    { playerId: "sorloth", name: "Alexander Sørloth", teamName: "Atlético de Madrid" },
+    { playerId: "dejong", name: "De Jong", teamName: "Barcelona" },
+    { playerId: "gavi", name: "Gavi", teamName: "Barcelona" },
+    { playerId: "serrano", name: "Nico Serrano", teamName: "Athletic Club" },
+    { playerId: "williams", name: "Nico Williams", teamName: "Athletic Club" },
+  ];
+
+  it("matches a name whose letter Unicode does not decompose", () => {
+    // "ø" has no NFD decomposition, so stripping combining marks left it
+    // intact and the punctuation filter turned it into a space: "s rloth".
+    const matcher = new NameMatcher(REAL);
+    expect(matcher.match("Alexander Sorloth", "Atlético")?.playerId).toBe("sorloth");
+  });
+
+  it("normalises the whole family of them", () => {
+    expect(normalizeName("Sørloth")).toBe("sorloth");
+    expect(normalizeName("Håland")).toBe("haland");
+    expect(normalizeName("Łukasz")).toBe("lukasz");
+    expect(normalizeName("Weiß")).toBe("weiss");
+  });
+
+  it("matches across a name particle", () => {
+    // "de" is two letters, so it was dropped as insignificant and "Frenkie de
+    // Jong" reduced to a bare "jong" — which only ever reached the weakest
+    // strategy, at a confidence the 0.8 floor then discarded.
+    const matcher = new NameMatcher(REAL);
+    const result = matcher.match("Frenkie de Jong", "Barcelona");
+    expect(result?.playerId).toBe("dejong");
+    expect(result?.confidence).toBeGreaterThanOrEqual(0.8);
+  });
+
+  it("matches a full name against a mononym", () => {
+    const matcher = new NameMatcher(REAL);
+    const result = matcher.match("Pablo Gavi", "Barcelona");
+    expect(result?.playerId).toBe("gavi");
+    expect(result?.confidence).toBeGreaterThanOrEqual(0.8);
+  });
+
+  it("separates two players sharing a given name", () => {
+    const matcher = new NameMatcher(REAL);
+    expect(matcher.match("Nico Serrano", "Athletic Club")?.playerId).toBe("serrano");
+    expect(matcher.match("Nico Williams", "Athletic Club")?.playerId).toBe("williams");
+  });
+
+  it("still refuses a bare given name that could be either of them", () => {
+    // A wrong match benches a fit starter, which is worse than no match, so a
+    // single token contained in one candidate stays a low-confidence guess.
+    const matcher = new NameMatcher(REAL);
+    const result = matcher.match("Nico", "Athletic Club");
+    expect(result === null || result.confidence < 0.8).toBe(true);
+  });
+});
+
+describe("significantTokens", () => {
+  it("keeps a particle glued to the name it belongs to", () => {
+    expect(significantTokens("Frenkie de Jong")).toContain("dejong");
+    expect(significantTokens("Frenkie de Jong")).toContain("jong");
+  });
+
+  it("does not emit a bare particle as a token of its own", () => {
+    expect(significantTokens("Frenkie de Jong")).not.toContain("de");
   });
 });
