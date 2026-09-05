@@ -54,6 +54,9 @@ async function cleanup() {
   await sql`DELETE FROM team_name_history WHERE team_id LIKE ${PREFIX + "%"}`;
   await sql`DELETE FROM teams WHERE team_id LIKE ${PREFIX + "%"}`;
   await sql`DELETE FROM action_log WHERE action LIKE ${PREFIX + "%"}`;
+  // The lock rows are written under the real action name, so they are found by
+  // the smoke-prefixed player id inside the detail rather than by the action.
+  await sql`DELETE FROM action_log WHERE action = 'lock' AND detail ->> 'playerId' LIKE ${PREFIX + "%"}`;
 }
 
 async function main() {
@@ -183,6 +186,20 @@ async function main() {
     historyRows.map((h) => h.date).join(" > "),
   );
 
+  // The clause window and the suggested clause: a timestamptz in an UNNEST
+  // batch, which is exactly the kind of cast a unit test cannot check.
+  const CLAUSE_OPENS = "2026-09-07T18:05:10.923Z";
+  await repo.writeSnapshots(DAY, [
+    {
+      playerId: PREFIX + "fw",
+      clauseDate: CLAUSE_OPENS,
+      suggestedClause: 5_000_341,
+      onMarket: true,
+      askPrice: 18_931_044,
+      status: "doubt",
+    },
+  ]);
+
   const ownership = (await repo.getLatestOwnership()).filter((o) =>
     o.playerId.startsWith(PREFIX),
   );
@@ -192,12 +209,67 @@ async function main() {
     fw?.ownerTeamId === PREFIX + "t2" && fw?.teamId === PREFIX + "club",
     `owner=${fw?.ownerTeamId} club=${fw?.teamId}`,
   );
+  check(
+    "getLatestOwnership carries the clause window as an instant",
+    fw?.clauseDate === CLAUSE_OPENS &&
+      fw?.suggestedClause === 5_000_341 &&
+      fw?.onMarket === true &&
+      fw?.askPrice === 18_931_044 &&
+      fw?.status === "doubt",
+    `date=${fw?.clauseDate} suggested=${fw?.suggestedClause} onMarket=${fw?.onMarket}`,
+  );
+
+  // A fact learned on one day must still be readable on a later day that did
+  // not carry it -- the summary sweep and the cheap roster sync write different
+  // columns, so the newest row alone is not the answer.
+  await repo.writeSnapshots("2000-01-02", [
+    { playerId: PREFIX + "fw", value: 32_000_000 },
+  ]);
+  const laterOwnership = (await repo.getLatestOwnership()).find(
+    (o) => o.playerId === PREFIX + "fw",
+  );
+  check(
+    "getLatestOwnership takes the newest day that actually carried each column",
+    laterOwnership?.value === 32_000_000 &&
+      laterOwnership?.clauseDate === CLAUSE_OPENS,
+    `value=${laterOwnership?.value} date=${laterOwnership?.clauseDate}`,
+  );
+
+  // ------------------------------------------------- value backfill --------
+  // A day we never captured is recoverable for value alone, and a real capture
+  // must always win over a reconstructed one.
+  const backfilled = await repo.backfillValues([
+    { playerId: PREFIX + "fw", date: "1999-12-29", value: 26_000_000 },
+    // A day we did capture: the live value stands.
+    { playerId: PREFIX + "fw", date: DAY, value: 1 },
+  ]);
+  const backfillRows = (await sql`
+    SELECT snapshot_date, value, value_backfilled FROM player_snapshots
+    WHERE player_id = ${PREFIX + "fw"}
+      AND snapshot_date IN ('1999-12-29', ${DAY})
+    ORDER BY snapshot_date`) as Record<string, unknown>[];
+  check(
+    "backfillValues fills a missing day and never overwrites a real capture",
+    backfilled === 2 &&
+      Number(backfillRows[0]?.value) === 26_000_000 &&
+      backfillRows[0]?.value_backfilled === true &&
+      Number(backfillRows[1]?.value) === 31_000_000 &&
+      backfillRows[1]?.value_backfilled === false,
+    backfillRows
+      .map((r) => `${r.value}${r.value_backfilled ? "*" : ""}`)
+      .join(" "),
+  );
 
   // ------------------------------------------------- rounds and odds -------
   const rounds = [
     {
       id: PREFIX + "r1",
-      number: 1,
+      // Deliberately outside any real matchday range. The smoke database also
+      // holds the real LaLiga calendar, and `upsertPlayerRounds` resolves a
+      // round *number* onto a round id -- a number shared with a real round is
+      // ambiguous, and the form queries read whichever closed rounds are
+      // highest-numbered.
+      number: 901,
       status: "closed",
       raw: {},
       matches: [
@@ -215,7 +287,7 @@ async function main() {
     {
       // Deadline must be the earliest kickoff, not the last.
       id: PREFIX + "r2",
-      number: 2,
+      number: 902,
       status: "open",
       raw: {},
       matches: [
@@ -347,6 +419,37 @@ async function main() {
     `avg=${fwForm?.avgPoints} startRate=${fwForm?.startRate}`,
   );
 
+  // ------------------------------------------ measured start records -------
+  // The same facts from /1/player/summary, which arrive keyed by round number
+  // rather than round id and carry a real start flag. They must resolve
+  // against the calendar and win over a roundlineup row for the same round.
+  const summaryRows = await repo.upsertPlayerRounds([
+    {
+      playerId: PREFIX + "gk",
+      rounds: [
+        { round: 901, points: 6, initialLineUp: true, state: "st" },
+        // Not in the calendar at all: skipped rather than invented.
+        { round: 9909, points: 4, initialLineUp: true, state: "st" },
+      ],
+    },
+  ]);
+  check(
+    "upsertPlayerRounds resolves round numbers and skips unknown ones",
+    summaryRows === 1,
+    `wrote ${summaryRows}`,
+  );
+
+  const measured = (await repo.getPlayerForm(5)).find(
+    (f) => f.playerId === PREFIX + "gk",
+  );
+  check(
+    "getPlayerForm prefers the measured start record over the minutes proxy",
+    measured?.measuredRounds === 1 &&
+      measured?.startRate === 1 &&
+      measured?.avgPoints === 6,
+    `measured=${measured?.measuredRounds} rate=${measured?.startRate} avg=${measured?.avgPoints}`,
+  );
+
   // --------------------------------------------------------- ledgers -------
   const transfers = [
     {
@@ -445,6 +548,28 @@ async function main() {
   );
   check("logAction and getRecentActions", logged.length === 1);
 
+  // The audit log is the only record that a clause block exists -- no Futmondo
+  // payload carries lock state -- so reading it back is load-bearing.
+  await repo.logAction({
+    action: "lock",
+    target: PREFIX + "t1",
+    detail: { playerId: PREFIX + "locked", name: "Smoke locked" },
+    ok: true,
+  });
+  await repo.logAction({
+    action: "lock",
+    target: PREFIX + "t1",
+    detail: { playerId: PREFIX + "failed" },
+    ok: false,
+    error: "clause.lock.notAllowed",
+  });
+  const lockedIds = await repo.getLockedPlayerIds();
+  check(
+    "getLockedPlayerIds returns successful blocks only",
+    lockedIds.has(PREFIX + "locked") && !lockedIds.has(PREFIX + "failed"),
+    `${[...lockedIds].filter((id) => id.startsWith(PREFIX)).join(", ")}`,
+  );
+
   // ---------------------------------------------------------- session ------
   const before = await repo.loadSession();
   await repo.saveSession("smoke-token", "smoke-user");
@@ -464,6 +589,8 @@ async function main() {
     (await repo.upsertPlayers([])) === 0 &&
       (await repo.writeSnapshots(DAY, [])) === 0 &&
       (await repo.insertTransfers([])) === 0 &&
+      (await repo.backfillValues([])) === 0 &&
+      (await repo.upsertPlayerRounds([])) === 0 &&
       (await repo.saveOdds([])) === 0,
   );
 }

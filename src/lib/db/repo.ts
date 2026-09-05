@@ -8,6 +8,7 @@ import type {
   MatchOdds,
   MoneyEvent,
   Player,
+  PlayerRoundRecord,
   PlayerStats,
   RosterPlayer,
   RoundLineup,
@@ -175,9 +176,18 @@ export interface SnapshotInput {
   points?: number;
   average?: number;
   clausePrice?: number;
+  /** ISO instant the clause first becomes payable. Read, never derived. */
+  clauseDate?: string;
+  /** Futmondo's own valuation of a fair clause. */
+  suggestedClause?: number;
   ownerTeamId?: string;
   locked?: boolean;
   marketPrice?: number;
+  /** True when the owner already has them listed. */
+  onMarket?: boolean;
+  askPrice?: number;
+  /** Futmondo's own availability marker: "", "ok", "doubt", "injured", ... */
+  status?: string;
   /** Matches played: the sample size behind `average`. */
   matchesPlayed?: number;
   /** Per-round mean over the last five, a missed round counting as zero. */
@@ -216,9 +226,14 @@ export function mergeSnapshots(rows: SnapshotInput[]): SnapshotInput[] {
       points: row.points ?? prev.points,
       average: row.average ?? prev.average,
       clausePrice: row.clausePrice ?? prev.clausePrice,
+      clauseDate: row.clauseDate ?? prev.clauseDate,
+      suggestedClause: row.suggestedClause ?? prev.suggestedClause,
       ownerTeamId: row.ownerTeamId ?? prev.ownerTeamId,
       locked: row.locked ?? prev.locked,
       marketPrice: row.marketPrice ?? prev.marketPrice,
+      onMarket: row.onMarket ?? prev.onMarket,
+      askPrice: row.askPrice ?? prev.askPrice,
+      status: row.status ?? prev.status,
       matchesPlayed: row.matchesPlayed ?? prev.matchesPlayed,
       averageLastFive: row.averageLastFive ?? prev.averageLastFive,
       homeAverage: row.homeAverage ?? prev.homeAverage,
@@ -238,26 +253,35 @@ export async function writeSnapshots(
   await sql.query(
     `INSERT INTO player_snapshots (
        snapshot_date, player_id, value, points, average,
-       clause_price, owner_team_id, locked, market_price,
+       clause_price, clause_date, suggested_clause,
+       owner_team_id, locked, market_price, on_market, ask_price, status,
        matches_played, average_last_five, home_average, away_average, captured_at
      )
      SELECT $1::date, * FROM UNNEST(
        $2::text[], $3::bigint[], $4::numeric[], $5::numeric[],
-       $6::bigint[], $7::text[], $8::boolean[], $9::bigint[],
-       $10::int[], $11::numeric[], $12::numeric[], $13::numeric[]
+       $6::bigint[], $7::timestamptz[], $8::bigint[],
+       $9::text[], $10::boolean[], $11::bigint[], $12::boolean[], $13::bigint[], $14::text[],
+       $15::int[], $16::numeric[], $17::numeric[], $18::numeric[]
      ), now()
      ON CONFLICT (snapshot_date, player_id) DO UPDATE SET
        value         = COALESCE(EXCLUDED.value, player_snapshots.value),
        points        = COALESCE(EXCLUDED.points, player_snapshots.points),
        average       = COALESCE(EXCLUDED.average, player_snapshots.average),
        clause_price  = COALESCE(EXCLUDED.clause_price, player_snapshots.clause_price),
+       clause_date   = COALESCE(EXCLUDED.clause_date, player_snapshots.clause_date),
+       suggested_clause = COALESCE(EXCLUDED.suggested_clause, player_snapshots.suggested_clause),
        owner_team_id = COALESCE(EXCLUDED.owner_team_id, player_snapshots.owner_team_id),
        locked        = COALESCE(EXCLUDED.locked, player_snapshots.locked),
        market_price  = COALESCE(EXCLUDED.market_price, player_snapshots.market_price),
+       on_market     = COALESCE(EXCLUDED.on_market, player_snapshots.on_market),
+       ask_price     = COALESCE(EXCLUDED.ask_price, player_snapshots.ask_price),
+       status        = COALESCE(EXCLUDED.status, player_snapshots.status),
        matches_played    = COALESCE(EXCLUDED.matches_played, player_snapshots.matches_played),
        average_last_five = COALESCE(EXCLUDED.average_last_five, player_snapshots.average_last_five),
        home_average      = COALESCE(EXCLUDED.home_average, player_snapshots.home_average),
        away_average      = COALESCE(EXCLUDED.away_average, player_snapshots.away_average),
+       -- A live capture always beats a backfilled value, never the other way.
+       value_backfilled  = player_snapshots.value_backfilled AND EXCLUDED.value IS NULL,
        captured_at   = now()`,
     [
       date,
@@ -266,15 +290,58 @@ export async function writeSnapshots(
       rows.map((r) => r.points ?? null),
       rows.map((r) => r.average ?? null),
       rows.map((r) => r.clausePrice ?? null),
+      rows.map((r) => r.clauseDate ?? null),
+      rows.map((r) => r.suggestedClause ?? null),
       rows.map((r) => r.ownerTeamId ?? null),
       rows.map((r) => r.locked ?? null),
       rows.map((r) => r.marketPrice ?? null),
+      rows.map((r) => r.onMarket ?? null),
+      rows.map((r) => r.askPrice ?? null),
+      rows.map((r) => r.status ?? null),
       rows.map((r) => r.matchesPlayed ?? null),
       rows.map((r) => r.averageLastFive ?? null),
       rows.map((r) => r.homeAverage ?? null),
       rows.map((r) => r.awayAverage ?? null),
     ],
   );
+  return rows.length;
+}
+
+/**
+ * Value history reconstructed from `/1/player/summary`'s `prices[]`.
+ *
+ * The one place AGENTS.md rule 5 does not apply. History cannot be backfilled
+ * for points or ownership, because the API only reports the present — but the
+ * whole daily value series is republished on every summary call, so a day the
+ * sync missed is recoverable for value alone. That matters immediately: value
+ * trends are the input to half of the market reasoning and they were flat
+ * because there were two days of snapshots.
+ *
+ * A row written here is marked `value_backfilled`, and a live capture always
+ * overwrites it. Rows for days we already captured live are left alone.
+ */
+export async function backfillValues(
+  points: { playerId: string; date: string; value: number }[],
+): Promise<number> {
+  if (points.length === 0) return 0;
+  const sql = getSql();
+  const rows = (await sql.query(
+    `INSERT INTO player_snapshots (
+       snapshot_date, player_id, value, value_backfilled, captured_at
+     )
+     SELECT d, p, v, TRUE, now()
+     FROM UNNEST($1::date[], $2::text[], $3::bigint[]) AS t(d, p, v)
+     ON CONFLICT (snapshot_date, player_id) DO UPDATE SET
+       value = COALESCE(player_snapshots.value, EXCLUDED.value),
+       value_backfilled = player_snapshots.value IS NULL
+     RETURNING player_snapshots.player_id`,
+    [
+      points.map((p) => p.date),
+      points.map((p) => p.playerId),
+      points.map((p) => Math.round(p.value)),
+    ],
+  )) as Row[];
+
   return rows.length;
 }
 
@@ -304,6 +371,9 @@ export function snapshotsFromRoster(
     clausePrice: p.clause,
     ownerTeamId,
     locked: p.locked,
+    onMarket: p.onMarket,
+    askPrice: p.askPrice,
+    status: p.status,
     ...statFields(p.stats),
   }));
 }
@@ -315,6 +385,7 @@ export function snapshotsFromMarket(market: MarketPlayer[]): SnapshotInput[] {
     points: p.points,
     average: p.average,
     marketPrice: p.price,
+    status: p.status,
     ...statFields(p.stats),
     // A machine listing means nobody owns them; leave owner unset otherwise so
     // COALESCE does not clobber ownership learned from a roster sync.
@@ -408,8 +479,13 @@ export async function getLatestOwnership(): Promise<
     value: number | null;
     points: number | null;
     clausePrice: number | null;
+    clauseDate: string | null;
+    suggestedClause: number | null;
     ownerTeamId: string | null;
     locked: boolean | null;
+    onMarket: boolean | null;
+    askPrice: number | null;
+    status: string | null;
     average: number | null;
     matchesPlayed: number | null;
     averageLastFive: number | null;
@@ -418,15 +494,31 @@ export async function getLatestOwnership(): Promise<
   }[]
 > {
   const sql = getSql();
+  // Facts arrive from different calls on different days -- a clause date only
+  // from a summary sweep, a market listing only while it is live -- so each
+  // column takes the most recent day that actually carried one rather than
+  // whatever the newest row happens to hold.
   const rows = (await sql`
-    SELECT DISTINCT ON (s.player_id)
+    SELECT
       s.player_id, p.name, p.role, p.team_id, p.team_name, p.slug,
-      s.value, s.points, s.clause_price, s.owner_team_id, s.locked,
-      s.average, s.matches_played, s.average_last_five,
-      s.home_average, s.away_average
+      (array_agg(s.value            ORDER BY s.snapshot_date DESC) FILTER (WHERE s.value IS NOT NULL))[1]            AS value,
+      (array_agg(s.points           ORDER BY s.snapshot_date DESC) FILTER (WHERE s.points IS NOT NULL))[1]           AS points,
+      (array_agg(s.clause_price     ORDER BY s.snapshot_date DESC) FILTER (WHERE s.clause_price IS NOT NULL))[1]     AS clause_price,
+      (array_agg(s.clause_date      ORDER BY s.snapshot_date DESC) FILTER (WHERE s.clause_date IS NOT NULL))[1]      AS clause_date,
+      (array_agg(s.suggested_clause ORDER BY s.snapshot_date DESC) FILTER (WHERE s.suggested_clause IS NOT NULL))[1] AS suggested_clause,
+      (array_agg(s.owner_team_id    ORDER BY s.snapshot_date DESC) FILTER (WHERE s.owner_team_id IS NOT NULL))[1]    AS owner_team_id,
+      (array_agg(s.locked           ORDER BY s.snapshot_date DESC) FILTER (WHERE s.locked IS NOT NULL))[1]           AS locked,
+      (array_agg(s.on_market        ORDER BY s.snapshot_date DESC) FILTER (WHERE s.on_market IS NOT NULL))[1]        AS on_market,
+      (array_agg(s.ask_price        ORDER BY s.snapshot_date DESC) FILTER (WHERE s.ask_price IS NOT NULL))[1]        AS ask_price,
+      (array_agg(s.status           ORDER BY s.snapshot_date DESC) FILTER (WHERE s.status IS NOT NULL))[1]           AS status,
+      (array_agg(s.average          ORDER BY s.snapshot_date DESC) FILTER (WHERE s.average IS NOT NULL))[1]          AS average,
+      (array_agg(s.matches_played   ORDER BY s.snapshot_date DESC) FILTER (WHERE s.matches_played IS NOT NULL))[1]   AS matches_played,
+      (array_agg(s.average_last_five ORDER BY s.snapshot_date DESC) FILTER (WHERE s.average_last_five IS NOT NULL))[1] AS average_last_five,
+      (array_agg(s.home_average     ORDER BY s.snapshot_date DESC) FILTER (WHERE s.home_average IS NOT NULL))[1]     AS home_average,
+      (array_agg(s.away_average     ORDER BY s.snapshot_date DESC) FILTER (WHERE s.away_average IS NOT NULL))[1]     AS away_average
     FROM player_snapshots s
     JOIN players p ON p.player_id = s.player_id
-    ORDER BY s.player_id, s.snapshot_date DESC`) as Row[];
+    GROUP BY s.player_id, p.name, p.role, p.team_id, p.team_name, p.slug`) as Row[];
 
   return rows.map((r) => ({
     playerId: String(r.player_id),
@@ -438,8 +530,14 @@ export async function getLatestOwnership(): Promise<
     value: r.value === null ? null : Number(r.value),
     points: r.points === null ? null : Number(r.points),
     clausePrice: r.clause_price === null ? null : Number(r.clause_price),
+    clauseDate: isoInstant(r.clause_date),
+    suggestedClause:
+      r.suggested_clause === null ? null : Number(r.suggested_clause),
     ownerTeamId: r.owner_team_id as string | null,
     locked: r.locked as boolean | null,
+    onMarket: r.on_market as boolean | null,
+    askPrice: r.ask_price === null ? null : Number(r.ask_price),
+    status: r.status as string | null,
     average: r.average === null ? null : Number(r.average),
     matchesPlayed: r.matches_played === null ? null : Number(r.matches_played),
     averageLastFive:
@@ -772,6 +870,93 @@ export async function upsertRoundPoints(lineup: RoundLineup): Promise<number> {
   return lineup.players.length;
 }
 
+/**
+ * Sentinel `team_id` for a row that describes the player's own real-life
+ * appearance rather than a fantasy team fielding him.
+ *
+ * `round_points` was designed around `/1/userteam/roundlineup`, which is keyed
+ * by userteam — and which returns an empty player list for every closed round,
+ * so the table has always been empty. The same facts come free from
+ * `/1/player/summary`, but they have no owning userteam: they are about the
+ * player. Rather than attributing them to whoever happens to own him today,
+ * which would duplicate the row the moment he is transferred, they go in under
+ * this sentinel and readers prefer them.
+ */
+export const SUMMARY_TEAM_ID = "@summary";
+
+/**
+ * The measured start record from `/1/player/summary`'s `points[]`.
+ *
+ * This is the largest single improvement available to the expected-points
+ * model: start probability was a guess for 116 of 135 owned players, and the
+ * start term is the biggest factor in the projection.
+ *
+ * Round *numbers* arrive here, not round ids, so they are resolved against the
+ * stored calendar. A number with no matching round is skipped rather than
+ * invented — AGENTS.md rule 6 in the other direction.
+ */
+export async function upsertPlayerRounds(
+  records: { playerId: string; rounds: PlayerRoundRecord[] }[],
+): Promise<number> {
+  const flat = records.flatMap((rec) =>
+    rec.rounds.map((round) => ({ playerId: rec.playerId, round })),
+  );
+  if (flat.length === 0) return 0;
+
+  const sql = getSql();
+  const roundRows = (await sql`SELECT round_id, number FROM rounds`) as Row[];
+
+  // A matchday number must identify exactly one round. It does in the real
+  // calendar; if it ever does not, the honest answer is to skip that round
+  // rather than pick one of the candidates -- attributing a start record to the
+  // wrong round would corrupt the start rate that decides the XI.
+  const idByNumber = new Map<number, string | null>();
+  for (const r of roundRows) {
+    const number = Number(r.number);
+    idByNumber.set(number, idByNumber.has(number) ? null : String(r.round_id));
+  }
+
+  const rows = flat
+    .map(({ playerId, round }) => ({
+      roundId: idByNumber.get(round.round) ?? undefined,
+      playerId,
+      round,
+    }))
+    .filter((r): r is { roundId: string; playerId: string; round: PlayerRoundRecord } =>
+      r.roundId !== undefined,
+    );
+  if (rows.length === 0) return 0;
+
+  await sql.query(
+    `INSERT INTO round_points (
+       round_id, player_id, team_id, points, minutes, started, initial_lineup, source
+     )
+     SELECT rid, pid, tid, pts, mins, st, il, 'summary'
+     FROM UNNEST(
+       $1::text[], $2::text[], $3::text[], $4::numeric[], $5::int[],
+       $6::boolean[], $7::boolean[]
+     ) AS t(rid, pid, tid, pts, mins, st, il)
+     ON CONFLICT (round_id, player_id, team_id) DO UPDATE SET
+       points         = EXCLUDED.points,
+       minutes        = COALESCE(EXCLUDED.minutes, round_points.minutes),
+       started        = EXCLUDED.started,
+       initial_lineup = EXCLUDED.initial_lineup,
+       source         = EXCLUDED.source`,
+    [
+      rows.map((r) => r.roundId),
+      rows.map((r) => r.playerId),
+      rows.map(() => SUMMARY_TEAM_ID),
+      rows.map((r) => r.round.points),
+      // `minutesPlayed` came back as 1 for every round of every player
+      // sampled, so it is a flag rather than minutes and is not stored as one.
+      rows.map(() => null),
+      rows.map((r) => r.round.initialLineUp),
+      rows.map((r) => r.round.initialLineUp),
+    ],
+  );
+  return rows.length;
+}
+
 export interface PlayerForm {
   playerId: string;
   /** Mean points across the window's scored rounds. */
@@ -780,13 +965,21 @@ export interface PlayerForm {
   avgMinutes: number | null;
   /** Rounds of evidence, so callers can discount a thin sample. */
   rounds: number;
-  /** Share of recent rounds in which they played at least 60 minutes. */
+  /**
+   * Rounds where we actually know whether the player started, as opposed to
+   * inferring it from a non-zero score. Zero means `startRate` is a proxy.
+   */
+  measuredRounds: number;
+  /** Share of recent rounds started, measured where possible. */
   startRate: number;
 }
 
 /**
  * Real form from the last N completed rounds. Uses per-round rows rather than
  * a season average, so a player who has caught fire is visible immediately.
+ *
+ * One row per player per round: a summary-sourced row wins over a
+ * roundlineup-sourced one, because only the former carries a real start flag.
  */
 export async function getPlayerForm(lastRounds = 5): Promise<PlayerForm[]> {
   const sql = getSql();
@@ -796,24 +989,40 @@ export async function getPlayerForm(lastRounds = 5): Promise<PlayerForm[]> {
       WHERE status = 'closed'
       ORDER BY number DESC
       LIMIT ${lastRounds}
+    ),
+    deduped AS (
+      SELECT DISTINCT ON (rp.player_id, rp.round_id)
+        rp.player_id, rp.round_id, rp.points, rp.minutes, rp.initial_lineup
+      FROM round_points rp
+      JOIN recent r ON r.round_id = rp.round_id
+      ORDER BY rp.player_id, rp.round_id, (rp.source = 'summary') DESC
     )
     SELECT
-      rp.player_id,
-      avg(rp.points)::numeric  AS avg_points,
-      avg(rp.minutes)::numeric AS avg_minutes,
-      count(*)                 AS rounds,
-      avg(CASE WHEN COALESCE(rp.minutes, 0) >= 60 THEN 1.0 ELSE 0.0 END) AS start_rate
-    FROM round_points rp
-    JOIN recent r ON r.round_id = rp.round_id
-    GROUP BY rp.player_id`) as Row[];
+      player_id,
+      avg(points)::numeric  AS avg_points,
+      avg(minutes)::numeric AS avg_minutes,
+      count(*)              AS rounds,
+      count(initial_lineup) AS measured_rounds,
+      avg(CASE WHEN initial_lineup THEN 1.0 ELSE 0.0 END)
+        FILTER (WHERE initial_lineup IS NOT NULL)                    AS measured_start_rate,
+      avg(CASE WHEN COALESCE(minutes, 0) >= 60 THEN 1.0 ELSE 0.0 END) AS minutes_start_rate
+    FROM deduped
+    GROUP BY player_id`) as Row[];
 
-  return rows.map((r) => ({
-    playerId: String(r.player_id),
-    avgPoints: Number(r.avg_points ?? 0),
-    avgMinutes: r.avg_minutes === null ? null : Number(r.avg_minutes),
-    rounds: Number(r.rounds),
-    startRate: Number(r.start_rate ?? 0),
-  }));
+  return rows.map((r) => {
+    const measuredRounds = Number(r.measured_rounds ?? 0);
+    return {
+      playerId: String(r.player_id),
+      avgPoints: Number(r.avg_points ?? 0),
+      avgMinutes: r.avg_minutes === null ? null : Number(r.avg_minutes),
+      rounds: Number(r.rounds),
+      measuredRounds,
+      startRate:
+        measuredRounds > 0
+          ? Number(r.measured_start_rate ?? 0)
+          : Number(r.minutes_start_rate ?? 0),
+    };
+  });
 }
 
 // ---------------------------------------------------------------- ledger ----
@@ -1079,6 +1288,32 @@ export async function logAction(entry: {
       ${entry.detail === undefined ? null : JSON.stringify(entry.detail)}::jsonb,
       ${entry.ok}, ${entry.error ?? null}
     )`;
+}
+
+/**
+ * Players we have successfully clause-blocked, from our own audit log.
+ *
+ * A poor substitute for a reading and used only because no reading exists: the
+ * clause object is `{price, date, transferred, suggestedClause}` in every
+ * payload that carries one, with no `locked` field anywhere. So the engine
+ * could never observe the effect of its own write, `alreadyLocked` was
+ * permanently false, and `applyLocks` would have re-locked the same top five
+ * targets every day forever while never reaching the rest of the squad.
+ *
+ * A rival's clause payment or an admin recalculation could clear a block
+ * without leaving any trace here, so this can be wrong in the dangerous
+ * direction. It is bounded to recent history for that reason. See OPEN-7.
+ */
+export async function getLockedPlayerIds(sinceDays = 30): Promise<Set<string>> {
+  const sql = getSql();
+  const rows = (await sql`
+    SELECT detail ->> 'playerId' AS player_id
+    FROM action_log
+    WHERE action = 'lock'
+      AND ok
+      AND created_at >= now() - make_interval(days => ${sinceDays})
+      AND detail ->> 'playerId' IS NOT NULL`) as Row[];
+  return new Set(rows.map((r) => String(r.player_id)));
 }
 
 export interface ActionLogRow {
