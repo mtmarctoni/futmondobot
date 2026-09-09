@@ -15,7 +15,7 @@ import * as repo from "../db/repo";
 import { dbTokenStore } from "../db/token-store";
 import { FutmondoClient, type Scope } from "../futmondo/client";
 import { FutmondoError } from "../futmondo/errors";
-import type { FutmondoRole, PlayerStats } from "../futmondo/types";
+import type { FutmondoRole, PlayerPricePoint, PlayerStats } from "../futmondo/types";
 import {
   classify,
   classifyAll,
@@ -338,7 +338,7 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
   // value, so it is read rather than assumed. One extra call per listing, only
   // for players we might actually bid on, and a failure just falls back to the
   // observed default.
-  const increments = await readIncrements(
+  const { increments, prices } = await readListingDetail(
     client,
     scope,
     listings.map((l) => l.id),
@@ -371,6 +371,7 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
         player,
         price: listing.price,
         increment: increments.get(listing.id),
+        prices: prices.get(listing.id),
       };
     }),
     squad,
@@ -442,38 +443,69 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
 }
 
 /**
- * Minimum bid steps for today's listings.
+ * Minimum bid steps and daily value history for today's listings.
  *
- * Bounded, because this is one call per listing on top of everything else the
+ * Bounded, because this is two calls per listing on top of everything else the
  * report already does, and a market of a dozen machine listings is the normal
- * case. A listing we could not read simply falls back to the observed default
- * step rather than failing the section.
+ * case. A listing we could not read falls back to the observed default step,
+ * and drops out of the radar with a warning, rather than failing the section.
  */
 const INCREMENT_LOOKUP_LIMIT = 12;
 
-async function readIncrements(
+interface ListingDetail {
+  increments: Map<string, number>;
+  /**
+   * Daily value series per listing, from `/1/player/summary`'s `prices[]`.
+   *
+   * This is the only workable source for a listing's daily change. The series
+   * is republished in full on every call -- the one exception to "history
+   * cannot be backfilled" -- while `player_snapshots` is not an alternative
+   * here: `syncClausePrices` only fans out to players with an owner, and a
+   * machine listing has none, so the cheap listings this feeds have no stored
+   * history at all.
+   */
+  prices: Map<string, PlayerPricePoint[]>;
+}
+
+async function readListingDetail(
   client: FutmondoClient,
   scope: Scope,
   playerIds: string[],
   warnings: string[],
-): Promise<Map<string, number>> {
-  const out = new Map<string, number>();
-  let failures = 0;
+): Promise<ListingDetail> {
+  const increments = new Map<string, number>();
+  const prices = new Map<string, PlayerPricePoint[]>();
+  let stepFailures = 0;
+  let priceFailures = 0;
 
   for (const playerId of playerIds.slice(0, INCREMENT_LOOKUP_LIMIT)) {
     try {
-      const summary = await client.getAuctionSummary(scope, playerId);
-      if (summary?.increment) out.set(playerId, summary.increment);
+      const auction = await client.getAuctionSummary(scope, playerId);
+      if (auction?.increment) increments.set(playerId, auction.increment);
     } catch {
-      failures += 1;
+      stepFailures += 1;
+    }
+    try {
+      const summary = await client.getPlayerSummary(scope, playerId);
+      if (summary && summary.prices.length > 0) prices.set(playerId, summary.prices);
+    } catch {
+      priceFailures += 1;
     }
   }
-  if (failures > 0) {
+  if (stepFailures > 0) {
     warnings.push(
-      `Could not read the minimum bid step for ${failures} listing(s); using the default step for those.`,
+      `Could not read the minimum bid step for ${stepFailures} listing(s); using the default step for those.`,
     );
   }
-  return out;
+  // Said out loud rather than folded into "nothing is rising". Without the
+  // series the daily change is unknown, and a silent unknown makes a failed
+  // read indistinguishable from a market with no opportunities in it.
+  if (priceFailures > 0) {
+    warnings.push(
+      `Could not read the value history for ${priceFailures} listing(s); the low-value radar cannot judge those.`,
+    );
+  }
+  return { increments, prices };
 }
 
 type OwnershipRow = Awaited<ReturnType<typeof repo.getLatestOwnership>>[number];
