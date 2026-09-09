@@ -168,6 +168,25 @@ describe("bid pricing", () => {
     expect((bid - 10_000_000) % 250_000).toBe(0);
   });
 
+  it("raises a cheap listing above the ask, where the markup rounds to nothing", () => {
+    // The percentage markup is smaller than one increment down here -- 12% of
+    // 900k is 108k against a 250k step -- so rounding down to whole steps used
+    // to hand back the asking price itself. The ask is the auction floor, so
+    // that bid loses every contested listing by construction.
+    const bid = suggestBid({ price: 900_000, ceiling: 50_000_000, increment: 250_000 });
+
+    expect(bid).toBeGreaterThan(900_000);
+    expect((bid - 900_000) % 250_000).toBe(0);
+  });
+
+  it("still refuses to raise a cheap listing past the ceiling", () => {
+    // One whole step does not fit, and there is no legal bid between the two,
+    // so the ask stands rather than an offer we could not fund.
+    expect(
+      suggestBid({ price: 2_000_000, ceiling: 2_100_000, increment: 250_000 }),
+    ).toBe(2_000_000);
+  });
+
   it("never exceeds what the player is worth to us", () => {
     const bid = suggestBid({ price: 10_000_000, ceiling: 10_400_000, increment: 250_000 });
     expect(bid).toBeLessThanOrEqual(10_400_000);
@@ -447,5 +466,87 @@ describe("the low-value radar", () => {
 
     expect(report.radar.opportunities).toEqual([]);
     expect(report.radar.unknownChange).toBe(1);
+  });
+});
+
+describe("bidding on a cheap upgrade", () => {
+  it("does not recommend bidding the asking price itself", () => {
+    // The willingness ceiling is value plus a 12% placeholder premium, which on
+    // a 900k player is narrower than a single 250k bid step. The bid therefore
+    // collapsed back to the ask -- the one offer guaranteed to lose a contested
+    // listing -- and the headline said "Bid 900k (asking 900k)" in as many
+    // words. A ceiling that cannot express one legal bid step is a rounding
+    // artifact, not a valuation.
+    const report = runMarket(
+      context({
+        listings: [
+          {
+            player: player({
+              playerId: "bargain",
+              value: 900_000,
+              expectedPoints: 6,
+            }),
+            price: 900_000,
+            increment: 250_000,
+          },
+        ],
+        squad: [player({ playerId: "mine", expectedPoints: 2, value: 5_000_000 })],
+        starterIds: new Set(["mine"]),
+      }),
+    );
+
+    const [buy] = report.buys;
+    expect(buy.suggestedBid).toBeGreaterThan(buy.price);
+    expect((buy.suggestedBid - buy.price) % 250_000).toBe(0);
+    expect(report.headline).not.toMatch(/Bid 900k€ .*asking 900k€/);
+  });
+
+  it("does not recommend a cheap player who is no upgrade at all", () => {
+    // Stretching the ceiling is justified by the upgrade being real, and the
+    // buy list is already confined to real upgrades. Pinned so that widening
+    // the bid cannot quietly widen what gets recommended.
+    const report = runMarket(
+      context({
+        listings: [
+          {
+            player: player({
+              playerId: "spare",
+              value: 900_000,
+              expectedPoints: 0.5,
+            }),
+            price: 900_000,
+            increment: 250_000,
+          },
+        ],
+        squad: [player({ playerId: "mine", expectedPoints: 4, value: 5_000_000 })],
+        starterIds: new Set(["mine"]),
+      }),
+    );
+
+    expect(report.buys.map((b) => b.player.playerId)).not.toContain("spare");
+  });
+
+  it("never stretches the ceiling past what we can actually spend", () => {
+    const report = runMarket(
+      context({
+        listings: [
+          {
+            player: player({
+              playerId: "bargain",
+              value: 900_000,
+              expectedPoints: 6,
+            }),
+            price: 900_000,
+            increment: 250_000,
+          },
+        ],
+        squad: [player({ playerId: "mine", expectedPoints: 2, value: 5_000_000 })],
+        starterIds: new Set(["mine"]),
+        funds: 1_000_000,
+        teamValue: 0,
+      }),
+    );
+
+    expect(report.buys[0].suggestedBid).toBeLessThanOrEqual(1_000_000);
   });
 });
