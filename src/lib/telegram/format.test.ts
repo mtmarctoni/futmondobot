@@ -79,7 +79,9 @@ describe("formatOpportunities", () => {
     );
 
     expect(text).toMatch(/3/);
-    expect(text.toLowerCase()).toContain("value history");
+    // "no value history" would be a lie about a series that was read but is
+    // stale or has a hole in it. What is missing is a *daily* change.
+    expect(text.toLowerCase()).toContain("daily change");
   });
 
   it("stays silent about unreadable listings when there is nothing to report", () => {
@@ -92,5 +94,34 @@ describe("formatOpportunities", () => {
     const text = formatOpportunities(radar({ opportunities: [opportunity()] }));
 
     expect(text).not.toMatch(/\p{Extended_Pictographic}/u);
+  });
+});
+
+describe("formatOpportunities and message size", () => {
+  const many = Array.from({ length: 30 }, (_, i) =>
+    opportunity({ playerId: `p${i}`, name: `Player Number ${i}` }),
+  );
+
+  it("caps the list so one busy market cannot kill the daily message", () => {
+    // Telegram rejects a message over 4096 characters outright, and this
+    // section shares one message with the XI, the actions and the departures.
+    // An unbounded list would mean the whole report fails to send on exactly
+    // the day the market is most interesting.
+    const text = formatOpportunities(radar({ opportunities: many }));
+
+    expect(text.length).toBeLessThan(1000);
+  });
+
+  it("says how many it left out rather than truncating in silence", () => {
+    const text = formatOpportunities(radar({ opportunities: many }));
+
+    expect(text).toMatch(/25 more/);
+  });
+
+  it("keeps the best of them, since the list is ranked", () => {
+    const text = formatOpportunities(radar({ opportunities: many }));
+
+    expect(text).toContain("Player Number 0");
+    expect(text).not.toContain("Player Number 29");
   });
 });
