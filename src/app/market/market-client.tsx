@@ -2,6 +2,8 @@
 
 import type { AnalysisReport } from "@/lib/engine";
 
+import { LOW_VALUE_CEILING } from "@/lib/engine/radar";
+
 import {
   Card,
   Delta,
@@ -9,16 +11,22 @@ import {
   ErrorBox,
   Loading,
   Money,
+  OpportunityToast,
   Pts,
   RefreshButton,
   Role,
   Warnings,
   useAnalysis,
+  useNewOpportunities,
   money,
 } from "../ui";
 
 export function MarketClient({ initial }: { initial: AnalysisReport }) {
   const { data, loading, error, refresh } = useAnalysis(initial);
+  // Above the early returns: hooks cannot be called conditionally, and the
+  // toast has to survive a refresh that briefly has no data.
+  const radar = data?.market.radar ?? { opportunities: [], unknownChange: 0 };
+  const { fresh, dismiss } = useNewOpportunities(radar.opportunities);
 
   if (loading && !data) return <Loading />;
   if (error) return <ErrorBox error={error} onRetry={refresh} />;
@@ -87,6 +95,60 @@ export function MarketClient({ initial }: { initial: AnalysisReport }) {
           </ul>
         </Card>
       )}
+
+
+      <Card
+        title="Speculation opportunities"
+        subtitle={`Listings at or under ${money(LOW_VALUE_CEILING)} whose value rose today, best percentage gain first. A bet on the price, not on the XI: nothing here is judged on whether the player would start.`}
+      >
+        {radar.opportunities.length === 0 ? (
+          <Empty>
+            {radar.unknownChange > 0
+              ? `Nothing is rising in the cheap end of the market. ${radar.unknownChange} listing(s) had no readable value history and could not be judged.`
+              : "Nothing is rising in the cheap end of the market."}
+          </Empty>
+        ) : (
+          <>
+            <ul>
+              {radar.opportunities.map((o) => (
+                <li
+                  key={o.playerId}
+                  className="flex items-center gap-3 border-b border-zinc-800/60 py-2 last:border-0"
+                >
+                  <Role role={o.role} />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-medium text-zinc-100">{o.name}</p>
+                    <p className="text-xs text-zinc-500">
+                      {o.clubName ?? "Club unknown"} · rose{" "}
+                      {(o.dailyChangePct * 100).toFixed(1)}% today
+                    </p>
+                  </div>
+                  <div className="shrink-0 text-right text-sm">
+                    <div className="text-zinc-100">
+                      <Money value={o.suggestedBid} />
+                    </div>
+                    {/* Both figures, because the ask is the auction floor and
+                        bidding it loses every contested listing. */}
+                    <div className="text-xs text-zinc-500">
+                      asking <Money value={o.price} /> · value{" "}
+                      <Money value={o.value} />
+                    </div>
+                    <div className="text-xs text-emerald-300">
+                      +<Money value={o.dailyChange} /> today
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {radar.unknownChange > 0 && (
+              <p className="mt-2 text-xs text-zinc-500">
+                {radar.unknownChange} more cheap listing(s) had no readable value
+                history, so they were not judged.
+              </p>
+            )}
+          </>
+        )}
+      </Card>
 
       <Card
         title="Worth buying"
@@ -203,6 +265,7 @@ export function MarketClient({ initial }: { initial: AnalysisReport }) {
       )}
 
       <Warnings warnings={data.warnings} />
+      <OpportunityToast opportunities={fresh} onDismiss={dismiss} />
     </div>
   );
 }

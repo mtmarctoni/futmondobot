@@ -1,8 +1,24 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import type { AnalysisReport, Coverage, DepartedPlayer } from "@/lib/engine";
+import type { LowValueOpportunity } from "@/lib/engine/radar";
 import type { Evaluated } from "@/lib/engine/types";
+
+import {
+  getSeenServerSnapshot,
+  getSeenSnapshot,
+  newIds,
+  parseSeen,
+  subscribeSeen,
+  writeSeen,
+} from "./unseen";
 
 // ------------------------------------------------------------------ data ----
 
@@ -349,5 +365,107 @@ export function RefreshButton({
     >
       {loading ? "Refreshing…" : "Refresh"}
     </button>
+  );
+}
+
+
+// ------------------------------------------------------------ radar ----
+
+/**
+ * The opportunities this browser has not been alerted about yet.
+ *
+ * Runs in an effect rather than during render because localStorage does not
+ * exist on the server, and the first paint is server-rendered. The seen set is
+ * written as soon as the alert is shown, so a refresh does not repeat it.
+ */
+export function useNewOpportunities(opportunities: LowValueOpportunity[]) {
+  const ids = opportunities.map((o) => o.playerId).join(",");
+
+  // localStorage is an external store, so it is read through the API meant for
+  // one rather than through an effect that sets state. The server snapshot is
+  // null, so the first paint and the hydration match: nothing is alerted until
+  // the browser's own store has been read.
+  const seenRaw = useSyncExternalStore(
+    subscribeSeen,
+    getSeenSnapshot,
+    getSeenServerSnapshot,
+  );
+
+  const [dismissedFor, setDismissedFor] = useState<string | null>(null);
+
+  const fresh = useMemo(() => {
+    if (seenRaw === null || dismissedFor === ids) return [];
+    const unseen = new Set(
+      newIds(
+        opportunities.map((o) => o.playerId),
+        parseSeen(seenRaw),
+      ),
+    );
+    return opportunities.filter((o) => unseen.has(o.playerId));
+  }, [seenRaw, opportunities, ids, dismissedFor]);
+
+  // Recording the visit is a write to an external system, which is what an
+  // effect is for. It runs after the alert has been derived, so showing it and
+  // remembering it do not race.
+  useEffect(() => {
+    writeSeen(ids === "" ? [] : ids.split(","));
+  }, [ids]);
+
+  const dismiss = useCallback(() => setDismissedFor(ids), [ids]);
+  return { fresh, dismiss };
+}
+
+/**
+ * The in-app alert for a newly detected opportunity.
+ *
+ * `role="status"` with a polite live region so a screen reader announces it
+ * without interrupting, and it is dismissible: an alert that cannot be closed
+ * covers the page it is pointing at.
+ */
+export function OpportunityToast({
+  opportunities,
+  onDismiss,
+}: {
+  opportunities: LowValueOpportunity[];
+  onDismiss: () => void;
+}) {
+  if (opportunities.length === 0) return null;
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="fixed bottom-4 right-4 z-50 w-80 max-w-[calc(100vw-2rem)] rounded-xl border border-emerald-800 bg-emerald-950/90 p-4 shadow-lg backdrop-blur"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <h2 className="font-medium text-emerald-100">
+          {opportunities.length === 1
+            ? "New market opportunity"
+            : `${opportunities.length} new market opportunities`}
+        </h2>
+        <button
+          type="button"
+          onClick={onDismiss}
+          aria-label="Dismiss"
+          className="rounded px-1 text-emerald-300 transition hover:bg-emerald-900 hover:text-emerald-100"
+        >
+          Close
+        </button>
+      </div>
+      <ul className="mt-2 space-y-1">
+        {opportunities.slice(0, 3).map((o) => (
+          <li key={o.playerId} className="text-sm text-emerald-200">
+            <span className="font-medium text-emerald-50">{o.name}</span> —{" "}
+            {money(o.value)}, +{money(o.dailyChange)} (+
+            {(o.dailyChangePct * 100).toFixed(1)}%) today
+          </li>
+        ))}
+      </ul>
+      {opportunities.length > 3 && (
+        <p className="mt-1 text-xs text-emerald-400">
+          and {opportunities.length - 3} more below.
+        </p>
+      )}
+    </div>
   );
 }
