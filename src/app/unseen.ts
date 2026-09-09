@@ -39,42 +39,6 @@ export function parseSeen(raw: string | null): string[] {
 }
 
 /**
- * The seen list as an external store, for `useSyncExternalStore`.
- *
- * Cached deliberately. The snapshot has to mean "what this browser had seen
- * when the page loaded", so it must not change when we write our own visit
- * back -- otherwise the alert would erase itself on the very next render. Only
- * another tab, which arrives as a `storage` event, invalidates it.
- */
-let cachedSnapshot: string | null = null;
-
-export function getSeenSnapshot(): string {
-  if (cachedSnapshot === null) {
-    try {
-      cachedSnapshot = window.localStorage.getItem(SEEN_KEY) ?? "";
-    } catch {
-      cachedSnapshot = "";
-    }
-  }
-  return cachedSnapshot;
-}
-
-/** Null on the server, where there is no store and nothing has been seen. */
-export function getSeenServerSnapshot(): null {
-  return null;
-}
-
-export function subscribeSeen(onChange: () => void): () => void {
-  const handler = (event: StorageEvent) => {
-    if (event.key !== SEEN_KEY) return;
-    cachedSnapshot = null;
-    onChange();
-  };
-  window.addEventListener("storage", handler);
-  return () => window.removeEventListener("storage", handler);
-}
-
-/**
  * Replaces the seen set with the current listing ids rather than adding to it,
  * so the store cannot grow without bound as listings come and go.
  */
@@ -83,5 +47,14 @@ export function writeSeen(current: string[]): void {
     window.localStorage.setItem(SEEN_KEY, JSON.stringify(current));
   } catch {
     // Storage unavailable. The alert simply repeats next visit.
+  }
+}
+
+/** The seen ids for this browser. Empty wherever the store cannot be read. */
+export function readSeen(): string[] {
+  try {
+    return parseSeen(window.localStorage.getItem(SEEN_KEY));
+  } catch {
+    return [];
   }
 }
