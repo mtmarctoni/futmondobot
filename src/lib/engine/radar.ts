@@ -28,6 +28,32 @@ import { suggestBid } from "./market";
  */
 export const LOW_VALUE_CEILING = 2_500_000;
 
+/**
+ * How far apart the two newest valuations may be, and how old the newest may
+ * be, before the change between them stops being a *daily* one.
+ *
+ * Futmondo stamps the series around 02:25 UTC and the report runs whenever it
+ * runs, so an exact 24h rule would reject every real series. Thirty-six hours
+ * absorbs that jitter while still refusing a gap of two days or more.
+ *
+ * This matters because the alternative is a false claim rather than a missing
+ * one: without it, a player last revalued a week ago is reported as "up 120k
+ * today", and someone bids on that sentence.
+ */
+const DAILY_TOLERANCE_MS = 36 * 60 * 60 * 1000;
+
+/**
+ * Whether a listing is cheap enough to be worth a radar opinion at all.
+ *
+ * The single definition of "cheap", used both to decide which listings are
+ * worth spending a value-history call on and to filter the results. Two copies
+ * of this rule would drift by a euro and the radar would silently stop seeing
+ * a player, with nothing anywhere reporting an error.
+ */
+export function couldBeOpportunity(value: number): boolean {
+  return value > 0 && value <= LOW_VALUE_CEILING;
+}
+
 /** A market listing with everything the radar needs to judge it. */
 export interface RadarListing {
   playerId: string;
@@ -66,14 +92,17 @@ export interface RadarInput {
   listings: RadarListing[];
   /** The most Futmondo would let us offer for one player. Caps the bid. */
   ceiling: number;
+  /** When the report is being produced, to judge whether a series is current. */
+  now: Date;
 }
 
 export interface RadarReport {
   /** Cheap and rising, best percentage rise first. */
   opportunities: LowValueOpportunity[];
   /**
-   * Listings under the ceiling whose daily change could not be read, because
-   * the price series was unread or a day old at most.
+   * Listings under the ceiling whose daily change could not be established:
+   * the series was unread, has a single point, is stale, or has a hole in it
+   * where yesterday should be.
    *
    * Counted and surfaced rather than folded into "not rising". An unknown
    * change is not a flat one, and a module that cannot tell them apart makes a
@@ -88,7 +117,10 @@ export interface RadarReport {
  * Null when there are fewer than two points, which is a real state: a player
  * who joined the championship today has one valuation and no move yet.
  */
-function dailyChange(prices: PlayerPricePoint[]): { change: number; previous: number } | null {
+function dailyChange(
+  prices: PlayerPricePoint[],
+  now: Date,
+): { change: number; previous: number } | null {
   if (prices.length < 2) return null;
   // Sorted here rather than trusted: `parsePlayerPrices` sorts ascending, but
   // the radar also runs over listings assembled elsewhere, and reading the
@@ -96,6 +128,23 @@ function dailyChange(prices: PlayerPricePoint[]): { change: number; previous: nu
   const sorted = [...prices].sort((a, b) => a.date.localeCompare(b.date));
   const latest = sorted[sorted.length - 1];
   const previous = sorted[sorted.length - 2];
+
+  const latestAt = Date.parse(latest.date);
+  const previousAt = Date.parse(previous.date);
+  if (Number.isNaN(latestAt) || Number.isNaN(previousAt)) return null;
+
+  // A stale series and a series with a hole in it are both "we do not know
+  // today's change", not "today's change was this". Saying otherwise attaches
+  // the word "today" to a move that happened a week ago.
+  if (now.getTime() - latestAt > DAILY_TOLERANCE_MS) return null;
+  if (latestAt - previousAt > DAILY_TOLERANCE_MS) return null;
+
+  // A previous price of zero is the same parse artifact a current value of
+  // zero is, and there is no percentage to express against it. Reporting it
+  // printed "+100k (+0.0%)" -- a line that contradicts itself -- and sorted
+  // the most extreme move in the list dead last.
+  if (previous.price <= 0) return null;
+
   return { change: latest.price - previous.price, previous: previous.price };
 }
 
@@ -112,9 +161,12 @@ export function detectOpportunities(input: RadarInput): RadarReport {
   let unknownChange = 0;
 
   for (const listing of input.listings) {
-    if (listing.value > LOW_VALUE_CEILING) continue;
+    // A zero or negative value is a parse failure, not the cheapest player in
+    // the league, and presenting one as a free opportunity is how a wrong
+    // reading becomes a bid.
+    if (!couldBeOpportunity(listing.value)) continue;
 
-    const move = dailyChange(listing.prices);
+    const move = dailyChange(listing.prices, input.now);
     if (move === null) {
       unknownChange += 1;
       continue;
@@ -130,8 +182,9 @@ export function detectOpportunities(input: RadarInput): RadarReport {
       price: listing.price,
       dailyChange: move.change,
       // Against the previous day's value, which is what a percentage rise
-      // means. Dividing by today's value would understate every gain.
-      dailyChangePct: move.previous > 0 ? move.change / move.previous : 0,
+      // means. Dividing by today's value would understate every gain, and the
+      // previous value is guaranteed positive by dailyChange.
+      dailyChangePct: move.change / move.previous,
       suggestedBid: suggestBid({
         price: listing.price,
         ceiling: input.ceiling,

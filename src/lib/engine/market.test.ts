@@ -455,6 +455,33 @@ describe("the low-value radar", () => {
     expect(report.radar.opportunities[0].suggestedBid).toBeGreaterThan(2_000_000);
   });
 
+  it("judges cheapness on today's listing, not on a stored valuation", () => {
+    // Evaluated.value comes from history.ownership -- yesterday's snapshot --
+    // while the listing itself is live. Judging the ceiling on the stored
+    // figure would silently drop a player who fell under 2.5M today, which is
+    // exactly the player this module exists to find, and nothing would report
+    // an error.
+    const report = runMarket(
+      context({
+        listings: [
+          {
+            player: player({ playerId: "fell", value: 2_600_000 }),
+            price: 2_400_000,
+            value: 2_400_000,
+            increment: 250_000,
+            prices: [
+              { date: "2026-09-03T02:25:30.285Z", price: 2_300_000 },
+              { date: "2026-09-04T02:25:30.285Z", price: 2_400_000 },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(report.radar.opportunities.map((o) => o.playerId)).toEqual(["fell"]);
+    expect(report.radar.opportunities[0].value).toBe(2_400_000);
+  });
+
   it("leaves the radar empty when no price series was read", () => {
     const report = runMarket(
       context({

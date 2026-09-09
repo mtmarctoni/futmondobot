@@ -144,6 +144,16 @@ export interface MarketContext {
      * change rather than a flat one.
      */
     prices?: PlayerPricePoint[];
+    /**
+     * Today's market value, from the listing itself.
+     *
+     * `player.value` cannot stand in for it: Evaluated is built from
+     * `history.ownership`, which is yesterday's stored snapshot, so a player
+     * who fell under the radar's ceiling today would still be judged on the
+     * figure that kept him above it. Falls back to the stored value where a
+     * caller has no live one.
+     */
+    value?: number;
   }[];
   squad: Evaluated[];
   /** Who we would field right now, so a buy is judged against real starters. */
@@ -278,13 +288,14 @@ export function runMarket(ctx: MarketContext): MarketReport {
   // alone, so it must not be filtered by anything the XI comparison discards.
   const radar = detectOpportunities({
     ceiling,
+    now: ctx.now ?? new Date(),
     listings: ctx.listings.map((listing) => ({
       playerId: listing.player.playerId,
       name: listing.player.name,
       role: listing.player.role,
       clubName: listing.player.clubName,
       price: listing.price,
-      value: listing.player.value,
+      value: listing.value ?? listing.player.value,
       increment: listing.increment ?? DEFAULT_BID_INCREMENT,
       prices: listing.prices ?? [],
     })),

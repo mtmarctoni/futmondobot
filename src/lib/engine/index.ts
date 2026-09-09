@@ -34,6 +34,7 @@ import {
   type LineupPick,
 } from "./lineup";
 import { runMarket, type MarketReport } from "./market";
+import { couldBeOpportunity } from "./radar";
 import { buildToday, type TodayReport } from "./today";
 import { DEFAULT_RULES, type Evaluated, type LeagueRules } from "./types";
 
@@ -341,7 +342,7 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
   const { increments, prices } = await readListingDetail(
     client,
     scope,
-    listings.map((l) => l.id),
+    listings.map((l) => ({ id: l.id, value: l.value })),
     warnings,
   );
 
@@ -372,6 +373,9 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
         price: listing.price,
         increment: increments.get(listing.id),
         prices: prices.get(listing.id),
+        // Today's figure. The evaluated player carries yesterday's stored one,
+        // and the radar's ceiling has to be applied to the live market.
+        value: listing.value,
       };
     }),
     squad,
@@ -452,6 +456,16 @@ export async function runAnalysis(options: RunOptions = {}): Promise<AnalysisRep
  */
 const INCREMENT_LOOKUP_LIMIT = 12;
 
+/**
+ * How many cheap listings get a value-history call.
+ *
+ * Separate from the step limit because it is a separate cost against a
+ * separate subset: the step is needed for any listing we might bid on, the
+ * history only for one the radar could report. Both are throttled round trips
+ * on the critical path of every report.
+ */
+const HISTORY_LOOKUP_LIMIT = 12;
+
 interface ListingDetail {
   increments: Map<string, number>;
   /**
@@ -470,7 +484,7 @@ interface ListingDetail {
 async function readListingDetail(
   client: FutmondoClient,
   scope: Scope,
-  playerIds: string[],
+  listings: { id: string; value: number }[],
   warnings: string[],
 ): Promise<ListingDetail> {
   const increments = new Map<string, number>();
@@ -478,23 +492,40 @@ async function readListingDetail(
   let stepFailures = 0;
   let priceFailures = 0;
 
-  for (const playerId of playerIds.slice(0, INCREMENT_LOOKUP_LIMIT)) {
+  for (const listing of listings.slice(0, INCREMENT_LOOKUP_LIMIT)) {
     try {
-      const auction = await client.getAuctionSummary(scope, playerId);
-      if (auction?.increment) increments.set(playerId, auction.increment);
+      const auction = await client.getAuctionSummary(scope, listing.id);
+      if (auction?.increment) increments.set(listing.id, auction.increment);
     } catch {
       stepFailures += 1;
-    }
-    try {
-      const summary = await client.getPlayerSummary(scope, playerId);
-      if (summary && summary.prices.length > 0) prices.set(playerId, summary.prices);
-    } catch {
-      priceFailures += 1;
     }
   }
   if (stepFailures > 0) {
     warnings.push(
       `Could not read the minimum bid step for ${stepFailures} listing(s); using the default step for those.`,
+    );
+  }
+  if (listings.length > INCREMENT_LOOKUP_LIMIT) {
+    warnings.push(
+      `Today's market has ${listings.length} listings; the minimum bid step was read for the first ${INCREMENT_LOOKUP_LIMIT} and the default step assumed for the rest.`,
+    );
+  }
+
+  // Only the listings the radar could possibly report on. Every one of these
+  // is a throttled round trip on the critical path of the report, and a value
+  // history is worthless for a player the ceiling already excludes.
+  const cheap = listings.filter((l) => couldBeOpportunity(l.value));
+  for (const listing of cheap.slice(0, HISTORY_LOOKUP_LIMIT)) {
+    try {
+      const summary = await client.getPlayerSummary(scope, listing.id);
+      if (summary && summary.prices.length > 0) prices.set(listing.id, summary.prices);
+    } catch {
+      priceFailures += 1;
+    }
+  }
+  if (cheap.length > HISTORY_LOOKUP_LIMIT) {
+    warnings.push(
+      `${cheap.length} cheap listings today; the low-value radar judged the first ${HISTORY_LOOKUP_LIMIT}.`,
     );
   }
   // Said out loud rather than folded into "nothing is rising". Without the
