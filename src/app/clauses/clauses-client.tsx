@@ -4,6 +4,7 @@ import type { AnalysisReport } from "@/lib/engine";
 
 import {
   Card,
+  Delta,
   Empty,
   ErrorBox,
   Loading,
@@ -104,6 +105,59 @@ export function ClausesClient({ initial }: { initial: AnalysisReport }) {
           </ul>
         )}
       </Card>
+
+      {clauses.trendBets.length > 0 && (
+        <Card
+          title="Rising-value clauses"
+          subtitle="Rivals' players whose value is rising while the clause stays pinned by the owner. Paying it bets on forward value — the payoff is future, not today's discount. Ordered by opportunity, affordable first."
+        >
+          <ul>
+            {clauses.trendBets.map((bet) => (
+              <li
+                key={bet.player.playerId}
+                className="flex items-center gap-3 border-b border-zinc-800/60 py-2 last:border-0"
+              >
+                <Role role={bet.player.role} />
+                <div className="min-w-0 flex-1">
+                  <p className="flex flex-wrap items-center gap-x-2 gap-y-1 truncate font-medium text-zinc-100">
+                    {bet.player.name}
+                    {bet.ownerName && (
+                      <span className="text-xs font-normal text-zinc-500">
+                        at {bet.ownerName}
+                      </span>
+                    )}
+                    <span
+                      className={`shrink-0 rounded px-1.5 py-0.5 text-xs ${
+                        bet.affordable
+                          ? "bg-emerald-500/15 text-emerald-300"
+                          : "bg-zinc-700/50 text-zinc-400"
+                      }`}
+                    >
+                      {bet.affordable ? "affordable" : "out of reach"}
+                    </span>
+                  </p>
+                  <p className="text-xs leading-relaxed text-zinc-500">
+                    {bet.reason}
+                  </p>
+                </div>
+                <div className="shrink-0 text-right text-sm">
+                  <div className="text-zinc-100">
+                    <Money value={bet.clausePrice} />
+                  </div>
+                  <div className="text-xs text-zinc-500">
+                    {bet.ratio.toFixed(2)}x vs value{" "}
+                    <Money value={bet.player.value} />
+                  </div>
+                  <div className="text-xs text-zinc-500">
+                    opp {bet.opportunity.toFixed(1)} · trend{" "}
+                    <Delta value={bet.player.valueDelta} />
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
 
       {clauses.pendingSteals.length > 0 && (
         <Card

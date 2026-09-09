@@ -7,7 +7,8 @@
  * already listed.
  */
 import { describe, expect, it } from "vitest";
-import { buildToday, type TodayInput } from "./today";
+import { buildToday, type Action, type TodayInput } from "./today";
+import type { ClauseBet } from "./clauses";
 import type { DepartedPlayer } from "./departed";
 import type { Evaluated } from "./types";
 import { DEFAULT_RULES } from "./types";
@@ -90,6 +91,7 @@ const NO_CLAUSES: ClauseReport = {
   pendingSteals: [],
   exposed: [],
   toLock: [],
+  trendBets: [],
   windowNote: null,
   headline: "",
 };
@@ -396,5 +398,79 @@ describe("prize-money wording in steal actions", () => {
     );
     const action = actions.find((a) => a.kind === "steal_clause");
     expect(action?.detail).toMatch(/180k€ a round in prize money/);
+  });
+});
+
+describe("clause_bet actions", () => {
+  function bet(over: Partial<ClauseBet> = {}): ClauseBet {
+    return {
+      player: evaluated({ playerId: "target", name: "Target" }),
+      clausePrice: 10_000_000,
+      ownerTeamId: "rival",
+      ownerName: "Rival FC",
+      ratio: 0.9,
+      discount: -1_000_000,
+      opportunity: 6,
+      affordable: true,
+      availableFrom: null,
+      clauseDateKnown: true,
+      reason:
+        "clause 10.0M€ vs value 9.0M€. The payoff is future value, not today's. Bet pays only if value keeps rising.",
+      ...over,
+    };
+  }
+
+  function betActions(over: ClauseBet[]): Action[] {
+    const { actions } = buildToday(
+      input({ clauses: { ...NO_CLAUSES, trendBets: over } }),
+    );
+    return actions.filter((a) => a.kind === "clause_bet");
+  }
+
+  it("surfaces an affordable, high-opportunity rising bet below the buy band", () => {
+    const [action] = betActions([bet()]);
+    expect(action).toBeDefined();
+    expect(action.kind).toBe("clause_bet");
+    expect(action.title).toMatch(/^Bet on Target: clause at 10.0M€, value rising/);
+    expect(action.money).toBe(-10_000_000);
+    expect(action.urgency).toBe("today");
+    // Market buys occupy 60-75; a forward bet must rank below them.
+    expect(action.weight).toBeLessThan(60);
+    expect(action.weight).toBeGreaterThanOrEqual(45);
+  });
+
+  it("carries the honest wording verbatim, never a discount claim", () => {
+    const [action] = betActions([bet()]);
+    expect(action.detail).toContain("future value, not today's");
+    expect(action.detail).not.toMatch(/free money|exploit|discount by any standard/i);
+  });
+
+  it("excludes bets below the minimum opportunity", () => {
+    expect(betActions([bet({ opportunity: 4.9 })])).toHaveLength(0);
+  });
+
+  it("excludes unaffordable bets no matter how strong the trend", () => {
+    expect(betActions([bet({ affordable: false, opportunity: 9 })])).toHaveLength(0);
+  });
+
+  it("caps at three bets, so the list never crowds the buys", () => {
+    const many = [1, 2, 3, 4].map((i) =>
+      bet({ player: evaluated({ playerId: `p${i}`, name: `Riser ${i}` }) }),
+    );
+    const actions = betActions(many);
+    expect(actions).toHaveLength(3);
+    expect(actions.map((a) => a.playerId)).toEqual(["p1", "p2", "p3"]);
+  });
+
+  it("still surfaces a bet whose window has not opened yet, flagged in the detail", () => {
+    const [action] = betActions([
+      bet({
+        availableFrom: "2026-09-07T18:05:10.923Z",
+        reason:
+          "Not payable until 2026-09-07 18:05Z. Bet pays only if value keeps rising.",
+      }),
+    ]);
+    expect(action).toBeDefined();
+    expect(action.detail).toMatch(/Not payable until 2026-09-07 18:05Z/);
   });
 });

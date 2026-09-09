@@ -275,3 +275,357 @@ describe("a steal whose clause window has never been read", () => {
     expect(report.steals[0].reason).not.toMatch(/has not been read yet/);
   });
 });
+
+describe("findClauseBets", () => {
+  it("detects a rising-value player whose clause stays pinned", () => {
+    const target = player({
+      playerId: "target",
+      ownerTeamId: "rival",
+      value: 15_000_000,
+      clausePrice: 18_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 3_320_000,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    expect(report.trendBets).toHaveLength(1);
+    const bet = report.trendBets[0];
+    expect(bet.player.playerId).toBe("target");
+    expect(bet.ratio).toBeCloseTo(0.83, 2);
+    expect(bet.discount).toBe(-3_000_000);
+    // trendScore 3.32 + ratioScore 1.75
+    expect(bet.opportunity).toBeCloseTo(5.07, 2);
+    expect(bet.reason).toContain("above today's value");
+    expect(bet.reason).toContain("Value up 3.32M€ in the last week");
+    expect(bet.reason).not.toMatch(/free money|giveaway|discount by any standard/i);
+  });
+
+  it("states plainly when the clause already sits under value", () => {
+    const target = player({
+      playerId: "target",
+      ownerTeamId: "rival",
+      value: 12_500_000,
+      clausePrice: 10_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 4_310_000,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    expect(report.trendBets).toHaveLength(1);
+    expect(report.trendBets[0].ratio).toBeGreaterThanOrEqual(1);
+    expect(report.trendBets[0].discount).toBe(2_500_000);
+    expect(report.trendBets[0].reason).toContain("under today's value");
+  });
+
+  it("excludes players whose value is not rising", () => {
+    const target = player({
+      playerId: "target",
+      ownerTeamId: "rival",
+      value: 15_000_000,
+      clausePrice: 10_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 0,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    expect(report.trendBets).toHaveLength(0);
+  });
+
+  it("excludes a clause so far above value that no trend justifies it", () => {
+    const target = player({
+      playerId: "target",
+      ownerTeamId: "rival",
+      value: 10_000_000,
+      clausePrice: 25_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 3_000_000,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    // ratio 0.4 is below BET_RATIO_MIN (0.7)
+    expect(report.trendBets).toHaveLength(0);
+  });
+
+  it("excludes locked players", () => {
+    const target = player({
+      playerId: "target",
+      ownerTeamId: "rival",
+      value: 15_000_000,
+      clausePrice: 10_000_000,
+      clauseLocked: true,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 3_000_000,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    expect(report.trendBets).toHaveLength(0);
+  });
+
+  it("excludes own players", () => {
+    const mine = player({
+      playerId: "mine",
+      value: 15_000_000,
+      clausePrice: 10_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 3_000_000,
+    });
+    const report = runClauses(context({ allPlayers: [mine] }));
+
+    expect(report.trendBets).toHaveLength(0);
+  });
+
+  it("excludes players without a clause", () => {
+    const target = player({
+      playerId: "target",
+      ownerTeamId: "rival",
+      value: 15_000_000,
+      clausePrice: null,
+      valueDelta: 3_000_000,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    expect(report.trendBets).toHaveLength(0);
+  });
+
+  it("never ranks a rising bet as a current discount", () => {
+    const target = player({
+      playerId: "target",
+      ownerTeamId: "rival",
+      value: 15_000_000,
+      clausePrice: 18_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 3_320_000,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    const bet = report.trendBets[0];
+    expect(bet.discount).toBeLessThan(0);
+    // The honest signal is the trend, never a claim that the clause is cheap
+    // today.
+    expect(bet.reason).toMatch(/payoff is future value/);
+    expect(bet.reason).toMatch(/pays only if value keeps rising/);
+  });
+
+  it("marks expensive clauses as not affordable", () => {
+    const target = player({
+      playerId: "target",
+      ownerTeamId: "rival",
+      value: 15_000_000,
+      clausePrice: 18_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 3_320_000,
+      expectedPoints: 5,
+    });
+    // funds of 5M < 18M clause
+    const report = runClauses(
+      context({
+        allPlayers: [target],
+        funds: 5_000_000,
+        teamValue: 0,
+      }),
+    );
+
+    expect(report.trendBets).toHaveLength(1);
+    expect(report.trendBets[0].affordable).toBe(false);
+    expect(report.trendBets[0].reason).toMatch(/beyond the/);
+  });
+
+  it("gates on clause.date for pending bets", () => {
+    const target = player({
+      playerId: "target",
+      ownerTeamId: "rival",
+      value: 15_000_000,
+      clausePrice: 10_000_000,
+      clauseDate: OPENS_LATER,
+      valueDelta: 3_000_000,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    expect(report.trendBets).toHaveLength(1);
+    expect(report.trendBets[0].availableFrom).toBe(OPENS_LATER);
+    expect(report.trendBets[0].reason).toMatch(/Not payable until/);
+  });
+
+  it("sorts by opportunity descending", () => {
+    // B: strong trend and clause already below value -> high score
+    const strong = player({
+      playerId: "strong",
+      ownerTeamId: "rival",
+      value: 12_500_000,
+      clausePrice: 10_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 4_310_000,
+      expectedPoints: 5,
+    });
+    // A: same-scale trend but clause 20% above value -> lower score
+    const weakerGap = player({
+      playerId: "weakerGap",
+      ownerTeamId: "rival",
+      value: 15_000_000,
+      clausePrice: 18_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 3_320_000,
+      expectedPoints: 5,
+    });
+    const report = runClauses(
+      context({ allPlayers: [strong, weakerGap] }),
+    );
+
+    expect(report.trendBets).toHaveLength(2);
+    expect(report.trendBets[0].opportunity).toBeGreaterThanOrEqual(
+      report.trendBets[1].opportunity,
+    );
+    expect(report.trendBets[0].player.playerId).toBe("strong");
+  });
+
+  it("treats the trend minimum as exclusive, so noise never sneaks in", () => {
+    // valueDelta exactly at BET_TREND_MIN_DELTA (250k) must not qualify.
+    const boundary = player({
+      playerId: "boundary",
+      ownerTeamId: "rival",
+      value: 14_000_000,
+      clausePrice: 20_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 250_000,
+      expectedPoints: 5,
+    });
+    const atLimit = runClauses(context({ allPlayers: [boundary] }));
+    expect(atLimit.trendBets).toHaveLength(0);
+
+    // One euro more qualifies.
+    const justOver = runClauses(
+      context({
+        allPlayers: [
+          player({ ...boundary, playerId: "justOver", valueDelta: 251_000 }),
+        ],
+      }),
+    );
+    expect(justOver.trendBets).toHaveLength(1);
+    expect(justOver.trendBets[0].player.playerId).toBe("justOver");
+  });
+
+  it("treats the ratio minimum as inclusive, and any hair below it misses", () => {
+    // value/clause = 14/20 = 0.70 exactly -> BET_RATIO_MIN qualifies.
+    const atMin = player({
+      playerId: "atMin",
+      ownerTeamId: "rival",
+      value: 14_000_000,
+      clausePrice: 20_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 1_000_000,
+      expectedPoints: 5,
+    });
+    const reportAt = runClauses(context({ allPlayers: [atMin] }));
+    expect(reportAt.trendBets).toHaveLength(1);
+
+    const justBelow = runClauses(
+      context({
+        allPlayers: [
+          player({
+            ...atMin,
+            playerId: "justBelow",
+            value: 13_990_000,
+          }),
+        ],
+      }),
+    );
+    expect(justBelow.trendBets).toHaveLength(0);
+  });
+
+  it("caps opportunity so a huge trend cannot inflate a bet forever", () => {
+    // ratio 3 (>= 1 -> ratioScore 3) and valueDelta 9M (clamped to 4).
+    const huge = player({
+      playerId: "huge",
+      ownerTeamId: "rival",
+      value: 30_000_000,
+      clausePrice: 10_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 9_000_000,
+      expectedPoints: 5,
+    });
+    // Same ratio, valueDelta only just over the 4M clamp point.
+    const justAtCap = player({
+      ...huge,
+      playerId: "justAtCap",
+      valueDelta: 4_000_000,
+    });
+    const report = runClauses(
+      context({ allPlayers: [huge, justAtCap] }),
+    );
+
+    const h = report.trendBets.find((b) => b.player.playerId === "huge");
+    const c = report.trendBets.find((b) => b.player.playerId === "justAtCap");
+    expect(h).toBeDefined();
+    expect(c).toBeDefined();
+    expect(h!.opportunity).toBe(7);
+    expect(c!.opportunity).toBe(7);
+  });
+
+  it("gives a floor score to a qualifying bet, never zero and never inflated", () => {
+    // Just past both minimums: delta 251k (0.251 score) + ratio 0.7 (0.75).
+    const floor = player({
+      playerId: "floor",
+      ownerTeamId: "rival",
+      value: 14_000_000,
+      clausePrice: 20_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 251_000,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [floor] }));
+
+    expect(report.trendBets).toHaveLength(1);
+    expect(report.trendBets[0].opportunity).toBeCloseTo(1.0, 2);
+    expect(report.trendBets[0].opportunity).toBeLessThanOrEqual(2);
+  });
+
+  it("flags an unread clause window instead of guessing it is open", () => {
+    const target = player({
+      playerId: "target",
+      ownerTeamId: "rival",
+      value: 15_000_000,
+      clausePrice: 18_000_000,
+      clauseDate: null,
+      valueDelta: 3_320_000,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    expect(report.trendBets).toHaveLength(1);
+    expect(report.trendBets[0].clauseDateKnown).toBe(false);
+    expect(report.trendBets[0].availableFrom).toBeNull();
+    expect(report.trendBets[0].reason).toMatch(
+      /Clause window has not been read yet.*check the date in Futmondo before paying/,
+    );
+  });
+
+  it("treats funds exactly equal to the clause as affordable", () => {
+    const target = player({
+      playerId: "target",
+      ownerTeamId: "rival",
+      value: 15_000_000,
+      clausePrice: 10_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 3_320_000,
+      expectedPoints: 5,
+    });
+    const report = runClauses(
+      context({
+        allPlayers: [target],
+        funds: 10_000_000,
+        teamValue: 0,
+      }),
+    );
+
+    expect(report.trendBets).toHaveLength(1);
+    expect(report.trendBets[0].affordable).toBe(true);
+    expect(report.trendBets[0].reason).not.toMatch(/beyond the/);
+  });
+});
