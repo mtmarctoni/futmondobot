@@ -187,6 +187,56 @@ will most likely be available next week.
 Affordability uses Futmondo's own reported ceiling when it gives one, otherwise
 funds plus 50% of squad value, per the league settings.
 
+A recommended bid is always at least one whole increment step above the ask,
+because the ask is the auction floor and an offer equal to it loses every
+contested listing. Two roundings used to defeat that rule, and only for cheap
+players, which is why it went unnoticed: `suggestBid` floored its percentage
+markup to whole steps, and the willingness ceiling -- value plus a 12%
+placeholder premium -- is itself narrower than one step below about 2.08M. Both
+are fixed, and the ceiling is stretched to one step above the ask only for a
+genuine upgrade and never past the offer ceiling or available cash.
+
+### The low-value radar
+
+`src/lib/engine/radar.ts`. A second, deliberately separate pass over the same
+listings, answering a different question: not "who improves the XI" but "whose
+price is moving off the floor". Exactly two conditions, and no others — market
+value at or under `LOW_VALUE_CEILING` (2.5M), and a daily value change above
+zero. Availability, expected points and whether the player would ever start are
+not consulted, because a speculation is a bet on the price. Results are ranked
+by percentage gain, which is the right ranking for that bet and the wrong one
+for a squad upgrade; keeping the two lists apart is what lets each keep its own
+ordering rule.
+
+The daily change comes from `/1/player/summary`'s `prices[]`, read live for each
+listing alongside the auction step. That series is republished in full on every
+call, which makes value the one exception to "history cannot be backfilled", so
+the radar does not depend on yesterday's sync having run. It deliberately does
+not read `player_snapshots`: `syncClausePrices` only fans out to players with an
+owner, and most listings at this price are the machine's, so the stored series
+would be empty for precisely the players the radar exists to find.
+
+A listing whose series could not be read has an **unknown** daily change, not a
+flat one. Those are counted and reported separately — in the Telegram section,
+on the market page, and as a warning — because a failed read and a market with
+no opportunities in it must never look the same.
+
+The bid it recommends clears the asking price, through the same `suggestBid`
+the buy list uses. Both figures are printed, so the difference between the
+auction floor and the offer is visible rather than implied.
+
+Nothing here spends money. The radar produces text and an alert; a bid still
+reaches Futmondo only through the confirmed-tap route, with funds re-checked at
+the moment of execution.
+
+The web app shows it as a "Speculation opportunities" panel on the market page,
+plus a dismissible in-app alert for listings this browser has not been shown
+before. That seen-state lives in `localStorage`, not the database: it differs
+per device rather than per league, and nothing about "has this person seen a
+toast" belongs in the ledger. The stored set is replaced by the current listing
+ids rather than accumulated, so it stays bounded — at the cost of a relisted
+player alerting a second time, which is the right side to err on.
+
 ## Clauses
 
 `src/lib/engine/clauses.ts`. This league runs manual clauses with **no weekly

@@ -216,6 +216,7 @@ src/lib/db/         schema, migrations, repository, session store
 src/lib/sync/       the jobs that accumulate history the API forgets
 src/lib/engine/     expected points -> lineup, market, clauses -> today's actions
 src/lib/engine/departed.ts  players who have left the competition, from the calendar
+src/lib/engine/radar.ts     cheap listings whose value is rising: speculation, ranked by % gain
 src/lib/engine/availability.ts  graded availability: out vs doubt vs fit
 src/lib/engine/apply.ts   the only place that writes to Futmondo automatically
 src/lib/providers/  probable-lineup scrape and name matching
