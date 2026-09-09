@@ -24,7 +24,7 @@
  * be guessing about a decision that spends five million euros.
  */
 import type { RivalFunds } from "../db/repo";
-import { fmtMoney, millions, type Evaluated, type LeagueRules } from "./types";
+import { clamp, fmtMoney, millions, type Evaluated, type LeagueRules } from "./types";
 
 export interface StealCandidate {
   player: Evaluated;
@@ -85,6 +85,12 @@ export interface ClauseReport {
   /** Players we should lock, most urgent first. */
   toLock: ExposedPlayer[];
   /**
+   * Rival players whose value is rising while their clause stays pinned. A
+   * bet on forward value, not a current discount — see the threshold block.
+   * Sorted by opportunity score descending, affordable first.
+   */
+  trendBets: ClauseBet[];
+  /**
    * Set when nothing of ours is clausable yet, naming the date it changes, so
    * the block happens before the window opens rather than after.
    */
@@ -125,6 +131,48 @@ export interface ClauseContext {
  */
 const BARGAIN_EFFICIENCY = 0.125;
 
+// ---------------------------------------------------------------------------
+// Rising-value clause bets.
+//
+// Live league data showed clauses are never set below a player's current value:
+// owners price above market as protection, and every "underpriced" candidate
+// from the first version of this feature was actually a clause 20-80% ABOVE
+// value, ranked as if it were free money. That first version recommended paying
+// over the market value of players and put a one-tap money button on it.
+//
+// What the data does support is a different, honest signal: a player whose
+// value is rising while his clause stays pinned. The owner sets the clause, not
+// the market, so it lags value — paying it now buys forward growth. The payoff
+// is future value and requires the trend to hold, so this is a bet and it is
+// stated as one, never as a discount.
+// ---------------------------------------------------------------------------
+
+/** Minimum 7-day value rise (euros) to count as a rising trend. */
+const BET_TREND_MIN_DELTA = 250_000;
+/**
+ * Loosest value/clause ratio worth betting on. Clause 43% or more above value
+ * is an overpay no trend justifies.
+ */
+const BET_RATIO_MIN = 0.7;
+
+export interface ClauseBet {
+  player: Evaluated;
+  clausePrice: number;
+  ownerTeamId: string;
+  ownerName: string | null;
+  /** market value / clause price. */
+  ratio: number;
+  /** Market value minus clause price, in euros. Negative when clause > value. */
+  discount: number;
+  /** 0-10 composite opportunity score. */
+  opportunity: number;
+  affordable: boolean;
+  /** ISO instant the clause becomes payable, when it is not payable yet. */
+  availableFrom: string | null;
+  clauseDateKnown: boolean;
+  reason: string;
+}
+
 /**
  * Whether a clause can be paid at the given instant.
  *
@@ -159,11 +207,14 @@ export function runClauses(ctx: ClauseContext): ClauseReport {
     .filter((e) => e.availableFrom === null && !e.alreadyLocked && e.threats.length > 0)
     .sort((a, b) => b.efficiency - a.efficiency);
 
+  const trendBets = findClauseBets(ctx, ceiling, now);
+
   return {
     steals,
     pendingSteals,
     exposed,
     toLock,
+    trendBets,
     windowNote: windowNote(exposed),
     headline: headline(steals, pendingSteals, toLock, ceiling),
   };
@@ -270,6 +321,128 @@ function findSteals(
     const bScore = b.upgrade * b.efficiency;
     return bScore - aScore;
   });
+}
+
+/**
+ * Rival players whose value is rising while their clause stays pinned,
+ * regardless of whether they would improve the XI. The owner sets the clause,
+ * so it lags a rising market value: paying it now captures the growth the
+ * market has already priced in.
+ *
+ * This is deliberately distinct from findSteals (lineup upgrade) and never
+ * framed as a current discount: clause is re-checked against value and the
+ * honest gap is said out loud, because the first version of this feature took
+ * a clause 30% above value and ranked it as an exploit.
+ */
+function findClauseBets(
+  ctx: ClauseContext,
+  ceiling: number,
+  now: Date,
+): ClauseBet[] {
+  const candidates: ClauseBet[] = [];
+
+  for (const player of ctx.allPlayers) {
+    if (!player.ownerTeamId || player.ownerTeamId === ctx.myTeamId) continue;
+    if (player.clauseLocked === true) continue;
+    if (player.clausePrice === null || player.clausePrice <= 0) continue;
+    if (player.value <= 0) continue;
+
+    if (player.valueDelta <= BET_TREND_MIN_DELTA) continue;
+
+    const clausePrice = player.clausePrice;
+    const ratio = player.value / clausePrice;
+    if (ratio < BET_RATIO_MIN) continue;
+
+    const discount = player.value - clausePrice;
+    const affordable = clausePrice <= Math.min(ceiling, ctx.funds);
+    const availableFrom = clauseOpen(player.clauseDate, now)
+      ? null
+      : (player.clauseDate as string);
+    const clauseDateKnown = player.clauseDate !== null;
+
+    candidates.push({
+      player,
+      clausePrice,
+      ownerTeamId: player.ownerTeamId,
+      ownerName: ctx.teamNames.get(player.ownerTeamId) ?? null,
+      ratio,
+      discount,
+      opportunity: clauseBetOpportunity(ratio, player.valueDelta),
+      affordable,
+      availableFrom,
+      clauseDateKnown,
+      reason: clauseBetReason({
+        player,
+        clausePrice,
+        ratio,
+        discount,
+        affordable,
+        availableFrom,
+        clauseDateKnown,
+        funds: ctx.funds,
+      }),
+    });
+  }
+
+  return candidates.sort((a, b) => {
+    if (a.affordable !== b.affordable) return a.affordable ? -1 : 1;
+    return b.opportunity - a.opportunity;
+  });
+}
+
+function clauseBetOpportunity(ratio: number, valueDelta: number): number {
+  // Mostly the trend: how much value is adding every week. The ratio adds up
+  // to three points for being at or below current value, less the further the
+  // clause sits above it.
+  const trendScore = clamp(valueDelta / 1_000_000, 0, 4);
+  const ratioScore = ratio >= 1 ? 3 : clamp((ratio - 0.6) * 7.5, 0, 3);
+  return clamp(trendScore + ratioScore, 0, 10);
+}
+
+function clauseBetReason(args: {
+  player: Evaluated;
+  clausePrice: number;
+  ratio: number;
+  discount: number;
+  affordable: boolean;
+  availableFrom: string | null;
+  clauseDateKnown: boolean;
+  funds: number;
+}): string {
+  const {
+    player,
+    clausePrice,
+    ratio,
+    discount,
+    affordable,
+    availableFrom,
+    clauseDateKnown,
+    funds,
+  } = args;
+
+  if (!affordable) {
+    return `Clause is ${fmtMoney(clausePrice)}, beyond the ${fmtMoney(funds)} available.`;
+  }
+
+  const gap =
+    discount >= 0
+      ? `It already sits ${fmtMoney(discount)} under today's value. `
+      : `It is ${fmtMoney(-discount)} above today's value — the payoff is future value, not today's. `;
+
+  const when = availableFrom
+    ? `Not payable until ${formatWhen(availableFrom)}. `
+    : clauseDateKnown
+      ? ""
+      : "Clause window has not been read yet — check the date in Futmondo before paying. ";
+
+  return [
+    `${ratio.toFixed(1)}x ratio — clause ${fmtMoney(clausePrice)} vs value ${fmtMoney(player.value)}.`,
+    gap,
+    `Value up ${fmtMoney(player.valueDelta)} in the last week; if the trend holds, this clause is the cheap way in before the owner raises it. Bet pays only if value keeps rising.`,
+    when.trim(),
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function findExposed(ctx: ClauseContext, now: Date): ExposedPlayer[] {

@@ -6,7 +6,7 @@
  * block costs nothing and is therefore always worth doing; a marginal buy can
  * wait. Anything that needs no action is deliberately not listed.
  */
-import type { ClauseReport, ExposedPlayer, StealCandidate } from "./clauses";
+import type { ClauseReport, ClauseBet, ExposedPlayer, StealCandidate } from "./clauses";
 import type { DepartedPlayer } from "./departed";
 import type { LineupChange, LineupPick } from "./lineup";
 import type { MarketReport, OwnListing } from "./market";
@@ -16,6 +16,7 @@ export type ActionKind =
   | "set_lineup"
   | "lock_player"
   | "steal_clause"
+  | "clause_bet"
   | "buy"
   | "sell"
   /**
@@ -86,6 +87,7 @@ export function buildToday(input: TodayInput): TodayReport {
   actions.push(...lockActions(input.clauses.toLock));
   actions.push(...clauseWindowActions(input.clauses));
   actions.push(...stealActions(input.clauses.steals, input.rules));
+  actions.push(...clauseBetActions(input.clauses.trendBets));
   // Departures already have their own action, and a duplicate sell for the
   // same player reads as two separate problems.
   actions.push(
@@ -282,6 +284,33 @@ function stealActions(steals: StealCandidate[], rules: LeagueRules): Action[] {
         playerName: steal.player.name,
       };
     });
+}
+
+/**
+ * Rival players whose value is rising while their clause stays pinned. Paying
+ * the clause buys forward growth — the payoff is future value and depends on
+ * the trend holding, so these are bets and are framed as such, never as
+ * discounts. Ranked below market buys: a current, priced opportunity beats a
+ * forward bet. Capped at 3.
+ */
+const MIN_BET_OPPORTUNITY = 5;
+
+function clauseBetActions(trendBets: ClauseBet[]): Action[] {
+  return trendBets
+    .filter((c) => c.affordable && c.opportunity >= MIN_BET_OPPORTUNITY)
+    .slice(0, 3)
+    .map((bet, index) => ({
+      id: `bet-${bet.player.playerId}`,
+      kind: "clause_bet" as const,
+      // Deliberately below the 60-75 band that market buys occupy.
+      weight: 45 + Math.min(12, bet.opportunity * 1.5) - index,
+      urgency: "today" as const,
+      title: `Bet on ${bet.player.name}: clause at ${fmtMoney(bet.clausePrice)}, value rising`,
+      detail: bet.reason,
+      money: -bet.clausePrice,
+      playerId: bet.player.playerId,
+      playerName: bet.player.name,
+    }));
 }
 
 /**
