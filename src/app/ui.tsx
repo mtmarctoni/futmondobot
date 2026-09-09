@@ -1,24 +1,11 @@
 "use client";
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-  useSyncExternalStore,
-} from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import type { AnalysisReport, Coverage, DepartedPlayer } from "@/lib/engine";
 import type { LowValueOpportunity } from "@/lib/engine/radar";
 import type { Evaluated } from "@/lib/engine/types";
 
-import {
-  getSeenServerSnapshot,
-  getSeenSnapshot,
-  newIds,
-  parseSeen,
-  subscribeSeen,
-  writeSeen,
-} from "./unseen";
+import { newIds, readSeen, writeSeen } from "./unseen";
 
 // ------------------------------------------------------------------ data ----
 
@@ -371,52 +358,33 @@ export function RefreshButton({
 
 // ------------------------------------------------------------ radar ----
 
+const NO_SUBSCRIBERS = () => () => {};
+
 /**
- * The opportunities this browser has not been alerted about yet.
+ * True once the browser is running this, false while it is being rendered on
+ * the server.
  *
- * Runs in an effect rather than during render because localStorage does not
- * exist on the server, and the first paint is server-rendered. The seen set is
- * written as soon as the alert is shown, so a refresh does not repeat it.
+ * The alert depends on localStorage, which does not exist during the server
+ * render, so it must not be part of the markup that gets hydrated. Gating on
+ * this rather than on an effect keeps the two renders in agreement and keeps
+ * the decision out of an effect that would have to set state.
  */
-export function useNewOpportunities(opportunities: LowValueOpportunity[]) {
-  const ids = opportunities.map((o) => o.playerId).join(",");
-
-  // localStorage is an external store, so it is read through the API meant for
-  // one rather than through an effect that sets state. The server snapshot is
-  // null, so the first paint and the hydration match: nothing is alerted until
-  // the browser's own store has been read.
-  const seenRaw = useSyncExternalStore(
-    subscribeSeen,
-    getSeenSnapshot,
-    getSeenServerSnapshot,
+export function useIsBrowser(): boolean {
+  return useSyncExternalStore(
+    NO_SUBSCRIBERS,
+    () => true,
+    () => false,
   );
-
-  const [dismissedFor, setDismissedFor] = useState<string | null>(null);
-
-  const fresh = useMemo(() => {
-    if (seenRaw === null || dismissedFor === ids) return [];
-    const unseen = new Set(
-      newIds(
-        opportunities.map((o) => o.playerId),
-        parseSeen(seenRaw),
-      ),
-    );
-    return opportunities.filter((o) => unseen.has(o.playerId));
-  }, [seenRaw, opportunities, ids, dismissedFor]);
-
-  // Recording the visit is a write to an external system, which is what an
-  // effect is for. It runs after the alert has been derived, so showing it and
-  // remembering it do not race.
-  useEffect(() => {
-    writeSeen(ids === "" ? [] : ids.split(","));
-  }, [ids]);
-
-  const dismiss = useCallback(() => setDismissedFor(ids), [ids]);
-  return { fresh, dismiss };
 }
 
 /**
- * The in-app alert for a newly detected opportunity.
+ * The in-app alert for opportunities this browser has not been shown before.
+ *
+ * Mounts only in the browser, and the caller keys it on the id list, so the
+ * "what is new" question is answered exactly once per set of listings: the
+ * state initialiser runs on mount and nothing recomputes it afterwards. That
+ * is what stops the alert erasing itself the moment the visit is recorded, and
+ * what stops it reappearing when the user navigates back to the page.
  *
  * `role="status"` with a polite live region so a screen reader announces it
  * without interrupting, and it is dismissible: an alert that cannot be closed
@@ -424,12 +392,28 @@ export function useNewOpportunities(opportunities: LowValueOpportunity[]) {
  */
 export function OpportunityToast({
   opportunities,
-  onDismiss,
 }: {
   opportunities: LowValueOpportunity[];
-  onDismiss: () => void;
 }) {
-  if (opportunities.length === 0) return null;
+  const [fresh] = useState(() => {
+    const unseen = new Set(
+      newIds(
+        opportunities.map((o) => o.playerId),
+        readSeen(),
+      ),
+    );
+    return opportunities.filter((o) => unseen.has(o.playerId));
+  });
+  const [dismissed, setDismissed] = useState(false);
+
+  // Recording the visit is a write to an external system, which is what an
+  // effect is for. It runs after the alert has been decided, so showing it and
+  // remembering it cannot race.
+  useEffect(() => {
+    writeSeen(opportunities.map((o) => o.playerId));
+  }, [opportunities]);
+
+  if (dismissed || fresh.length === 0) return null;
 
   return (
     <div
@@ -439,13 +423,13 @@ export function OpportunityToast({
     >
       <div className="flex items-start justify-between gap-3">
         <h2 className="font-medium text-emerald-100">
-          {opportunities.length === 1
+          {fresh.length === 1
             ? "New market opportunity"
-            : `${opportunities.length} new market opportunities`}
+            : `${fresh.length} new market opportunities`}
         </h2>
         <button
           type="button"
-          onClick={onDismiss}
+          onClick={() => setDismissed(true)}
           aria-label="Dismiss"
           className="rounded px-1 text-emerald-300 transition hover:bg-emerald-900 hover:text-emerald-100"
         >
@@ -453,7 +437,7 @@ export function OpportunityToast({
         </button>
       </div>
       <ul className="mt-2 space-y-1">
-        {opportunities.slice(0, 3).map((o) => (
+        {fresh.slice(0, 3).map((o) => (
           <li key={o.playerId} className="text-sm text-emerald-200">
             <span className="font-medium text-emerald-50">{o.name}</span> —{" "}
             {money(o.value)}, +{money(o.dailyChange)} (+
@@ -461,9 +445,9 @@ export function OpportunityToast({
           </li>
         ))}
       </ul>
-      {opportunities.length > 3 && (
+      {fresh.length > 3 && (
         <p className="mt-1 text-xs text-emerald-400">
-          and {opportunities.length - 3} more below.
+          and {fresh.length - 3} more below.
         </p>
       )}
     </div>

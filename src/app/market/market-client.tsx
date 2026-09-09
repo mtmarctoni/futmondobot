@@ -17,7 +17,7 @@ import {
   Role,
   Warnings,
   useAnalysis,
-  useNewOpportunities,
+  useIsBrowser,
   money,
 } from "../ui";
 
@@ -26,7 +26,10 @@ export function MarketClient({ initial }: { initial: AnalysisReport }) {
   // Above the early returns: hooks cannot be called conditionally, and the
   // toast has to survive a refresh that briefly has no data.
   const radar = data?.market.radar ?? { opportunities: [], unknownChange: 0 };
-  const { fresh, dismiss } = useNewOpportunities(radar.opportunities);
+  const isBrowser = useIsBrowser();
+  // Keyed on the id list so a market that has genuinely changed asks the
+  // question again, and one that has not does not.
+  const radarKey = radar.opportunities.map((o) => o.playerId).join(",");
 
   if (loading && !data) return <Loading />;
   if (error) return <ErrorBox error={error} onRetry={refresh} />;
@@ -104,7 +107,7 @@ export function MarketClient({ initial }: { initial: AnalysisReport }) {
         {radar.opportunities.length === 0 ? (
           <Empty>
             {radar.unknownChange > 0
-              ? `Nothing is rising in the cheap end of the market. ${radar.unknownChange} listing(s) had no readable value history and could not be judged.`
+              ? `Nothing is rising in the cheap end of the market. ${radar.unknownChange} listing(s) had no readable daily change and could not be judged.`
               : "Nothing is rising in the cheap end of the market."}
           </Empty>
         ) : (
@@ -142,8 +145,8 @@ export function MarketClient({ initial }: { initial: AnalysisReport }) {
             </ul>
             {radar.unknownChange > 0 && (
               <p className="mt-2 text-xs text-zinc-500">
-                {radar.unknownChange} more cheap listing(s) had no readable value
-                history, so they were not judged.
+                {radar.unknownChange} more cheap listing(s) had no readable
+                daily change, so they were not judged.
               </p>
             )}
           </>
@@ -265,7 +268,9 @@ export function MarketClient({ initial }: { initial: AnalysisReport }) {
       )}
 
       <Warnings warnings={data.warnings} />
-      <OpportunityToast opportunities={fresh} onDismiss={dismiss} />
+      {isBrowser && (
+        <OpportunityToast key={radarKey} opportunities={radar.opportunities} />
+      )}
     </div>
   );
 }
