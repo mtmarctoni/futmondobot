@@ -216,10 +216,41 @@ not read `player_snapshots`: `syncClausePrices` only fans out to players with an
 owner, and most listings at this price are the machine's, so the stored series
 would be empty for precisely the players the radar exists to find.
 
-A listing whose series could not be read has an **unknown** daily change, not a
-flat one. Those are counted and reported separately — in the Telegram section,
-on the market page, and as a warning — because a failed read and a market with
-no opportunities in it must never look the same.
+A listing whose daily change cannot be established has an **unknown** change,
+not a flat one. Those are counted and reported separately — in the Telegram
+section, on the market page, and as a warning — because a failed read and a
+market with no opportunities in it must never look the same. Four things land
+there, and the last two matter most:
+
+- no series at all, or a single point, which is a player who just arrived;
+- a **stale** series, whose newest valuation predates the report;
+- a series with a **hole** where yesterday should be, so the move between the
+  two newest points spans several days.
+
+The last two exist because the alternative is a false claim rather than a
+missing one. Without them a player last revalued a week ago is printed as "up
+120k today", and somebody bids on that sentence. The tolerance is 36 hours,
+which absorbs the jitter of a series Futmondo stamps around 02:25 while still
+refusing a two-day gap.
+
+Two zeroes are refused for the same reason. A market value of zero is a parse
+failure rather than the cheapest player in the league, and a *previous* value of
+zero leaves the percentage undefined — it used to print the self-contradicting
+line "+100k (+0.0%)" and sort the most extreme move in the list dead last.
+
+The ceiling is applied to **today's** listing value, not to `Evaluated.value`.
+That field is built from `history.ownership`, which is yesterday's stored
+snapshot, so judging on it would silently drop a player who fell under 2.5M
+today — precisely the player the module exists to find, with nothing anywhere
+reporting an error.
+
+Only listings that could actually qualify get a value-history call. Each one is
+a throttled round trip on the critical path of every report, and the same
+`couldBeOpportunity` predicate decides both what is fetched and what is
+filtered: two copies of "cheap" would drift by a euro and the radar would
+quietly stop seeing a player. Both that lookup and the bid-step lookup are
+bounded, and exceeding either bound is a warning rather than a silent
+truncation.
 
 The bid it recommends clears the asking price, through the same `suggestBid`
 the buy list uses. Both figures are printed, so the difference between the
@@ -229,9 +260,18 @@ Nothing here spends money. The radar produces text and an alert; a bid still
 reaches Futmondo only through the confirmed-tap route, with funds re-checked at
 the moment of execution.
 
+The daily Telegram message lists the best five and points at the web page for
+the rest. Telegram rejects a message over 4096 characters outright and this
+section shares one with the XI, the actions and the departures, so an unbounded
+list would mean the whole report fails to send on exactly the day the market is
+most worth reading.
+
 The web app shows it as a "Speculation opportunities" panel on the market page,
 plus a dismissible in-app alert for listings this browser has not been shown
-before. That seen-state lives in `localStorage`, not the database: it differs
+before. The alert mounts only in the browser and is keyed on the id list, so
+"what is new" is answered once per set of listings: that is what stops it
+erasing itself the moment the visit is recorded, and what stops it reappearing
+every time the user navigates back to the page. That seen-state lives in `localStorage`, not the database: it differs
 per device rather than per league, and nothing about "has this person seen a
 toast" belongs in the ledger. The stored set is replaced by the current listing
 ids rather than accumulated, so it stays bounded — at the cost of a relisted
