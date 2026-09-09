@@ -8,6 +8,7 @@
  */
 import type { AnalysisReport } from "../engine";
 import type { Action } from "../engine/today";
+import type { RadarReport } from "../engine/radar";
 import { fmtMoney } from "../engine/types";
 import { encodeCallback, needsConfirmation, type CallbackVerb } from "./callbacks";
 
@@ -168,6 +169,9 @@ export function formatReport(
   const departures = formatDepartures(report);
   if (departures) lines.push(departures);
 
+  const opportunities = formatOpportunities(report.market.radar);
+  if (opportunities) lines.push(opportunities);
+
   const actionable = report.today.actions.filter((a) => a.kind !== "info");
   if (actionable.length === 0) {
     lines.push("\nNothing needs doing.");
@@ -226,6 +230,42 @@ export function formatDepartures(report: AnalysisReport): string {
       player.onMarket
         ? `   Already on the market${player.askPrice !== null ? ` at ${fmtMoney(player.askPrice)}` : ""}. Take the best offer.`
         : `   List him on the market — there is a button for it below.`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Cheap players whose value is rising, as a Telegram section.
+ *
+ * Separate from the buy list on purpose: these are bets on a price, not on the
+ * XI, and reading them in the same list as an upgrade recommendation would
+ * blur which of the two a tap is agreeing to.
+ *
+ * Nothing here places a bid. The section is advice, and a bid still reaches
+ * Futmondo only through the confirmed-tap route, with funds re-checked at the
+ * moment of execution.
+ */
+export function formatOpportunities(radar: RadarReport): string {
+  if (radar.opportunities.length === 0) return "";
+
+  const lines: string[] = ["", "<b>Speculation opportunities</b>"];
+  for (const o of radar.opportunities) {
+    const club = o.clubName ? ` (${escapeHtml(o.clubName)})` : "";
+    const pct = (o.dailyChangePct * 100).toFixed(1);
+    lines.push(
+      `<b>${escapeHtml(o.name)}</b>${club} — ${fmtMoney(o.value)}, +${fmtMoney(o.dailyChange)} (+${pct}%) today`,
+    );
+    // The ask is the auction floor, so both figures are shown: proposing the
+    // floor loses every contested listing, and that is only visible if the
+    // reader can see the two numbers differ.
+    lines.push(
+      `   Ask ${fmtMoney(o.price)} — bid ${fmtMoney(o.suggestedBid)} (step ${fmtMoney(o.increment)})`,
+    );
+  }
+  if (radar.unknownChange > 0) {
+    lines.push(
+      `   ${radar.unknownChange} more cheap listing(s) had no readable value history, so they were not judged.`,
     );
   }
   return lines.join("\n");
