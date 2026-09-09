@@ -78,6 +78,7 @@ const SQUAD: Evaluated[] = [
 
 const NO_MARKET: MarketReport = {
   buys: [],
+  radar: { opportunities: [], unknownChange: 0 },
   sells: [],
   listings: [],
   funds: 0,

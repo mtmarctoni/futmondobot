@@ -21,7 +21,8 @@
  * (the most the player is worth to us) and a bid inside it, rounded to the
  * auction's own increment.
  */
-import type { FutmondoRole } from "../futmondo/types";
+import type { FutmondoRole, PlayerPricePoint } from "../futmondo/types";
+import { detectOpportunities, type RadarReport } from "./radar";
 import {
   directSellFloor,
   fmtMoney,
@@ -109,6 +110,16 @@ export interface OwnListing {
 
 export interface MarketReport {
   buys: BuyCandidate[];
+  /**
+   * Cheap players whose value is rising, ranked by percentage gain.
+   *
+   * Kept apart from `buys` on purpose. A buy is judged on whether it improves
+   * the XI and ranked by absolute upgrade; a speculation is judged only on
+   * price and movement. Merging them would mean one list ordered by two
+   * incompatible rules, which is how a 1.0M defender reached the top of the
+   * buy list once already.
+   */
+  radar: RadarReport;
   sells: SellCandidate[];
   /** Our own listings and the bids on them. Empty when the read failed. */
   listings: OwnListing[];
@@ -127,6 +138,12 @@ export interface MarketContext {
     price: number;
     /** Minimum bid step from `/1/market/playerauctionsummary`, when read. */
     increment?: number;
+    /**
+     * Daily value series from `/1/player/summary`, when read. Absent means the
+     * call failed or was never made, which the radar counts as an unknown
+     * change rather than a flat one.
+     */
+    prices?: PlayerPricePoint[];
   }[];
   squad: Evaluated[];
   /** Who we would field right now, so a buy is judged against real starters. */
@@ -245,6 +262,21 @@ export function suggestBid(args: {
 
 export function runMarket(ctx: MarketContext): MarketReport {
   const ceiling = maxOffer(ctx);
+  // Independent of the buy reasoning below: the radar looks at price movement
+  // alone, so it must not be filtered by anything the XI comparison discards.
+  const radar = detectOpportunities({
+    ceiling,
+    listings: ctx.listings.map((listing) => ({
+      playerId: listing.player.playerId,
+      name: listing.player.name,
+      role: listing.player.role,
+      clubName: listing.player.clubName,
+      price: listing.price,
+      value: listing.player.value,
+      increment: listing.increment ?? DEFAULT_BID_INCREMENT,
+      prices: listing.prices ?? [],
+    })),
+  });
   const committed = ctx.committed ?? 0;
   // Winning every open bid has to remain affordable, so cash already held by a
   // standing bid is not cash we can offer again.
@@ -328,6 +360,7 @@ export function runMarket(ctx: MarketContext): MarketReport {
 
   return {
     buys,
+    radar,
     sells,
     listings,
     funds: ctx.funds,

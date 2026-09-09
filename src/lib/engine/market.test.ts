@@ -412,3 +412,40 @@ describe("what a player is worth where points have no euro rate", () => {
     expect(ceiling).toBe(2 * 30 * 60_000 + 8_000_000);
   });
 });
+
+describe("the low-value radar", () => {
+  it("reports a cheap rising listing separately from the buy list", () => {
+    const report = runMarket(
+      context({
+        listings: [
+          {
+            player: player({ playerId: "cheap", value: 2_000_000, expectedPoints: 0.5 }),
+            price: 2_000_000,
+            increment: 250_000,
+            prices: [
+              { date: "2026-09-03T02:25:30.285Z", price: 1_900_000 },
+              { date: "2026-09-04T02:25:30.285Z", price: 2_000_000 },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(report.radar.opportunities.map((o) => o.playerId)).toEqual(["cheap"]);
+    // A speculation is not an XI upgrade, so the bid must clear the ask.
+    expect(report.radar.opportunities[0].suggestedBid).toBeGreaterThan(2_000_000);
+  });
+
+  it("leaves the radar empty when no price series was read", () => {
+    const report = runMarket(
+      context({
+        listings: [
+          { player: player({ playerId: "cheap", value: 2_000_000 }), price: 2_000_000 },
+        ],
+      }),
+    );
+
+    expect(report.radar.opportunities).toEqual([]);
+    expect(report.radar.unknownChange).toBe(1);
+  });
+});
