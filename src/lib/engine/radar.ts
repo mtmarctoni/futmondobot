@@ -17,7 +17,7 @@
  */
 import type { PlayerPricePoint } from "../futmondo/types";
 
-import { DEFAULT_BID_INCREMENT, suggestBid } from "./market";
+import { suggestBid } from "./market";
 
 /**
  * The price floor this module looks below, in euros.
@@ -100,27 +100,6 @@ function dailyChange(prices: PlayerPricePoint[]): { change: number; previous: nu
 }
 
 /**
- * What to actually offer for a cheap listing.
- *
- * `suggestBid` adds a percentage markup and rounds it **down** to a whole
- * increment step, which is right for an expensive player and a no-op for a
- * cheap one: 12% of a 2.0M ask is 240.000, less than the observed 250.000
- * step, so it floors to zero steps and hands back the asking price. The ask is
- * the auction floor, so that bid loses every contested listing by
- * construction -- and this module only ever looks at that band.
- *
- * So the radar raises the floor to one whole step above the ask wherever the
- * ceiling allows it. Where it does not, the shared result stands rather than a
- * bid we could not fund.
- */
-function radarBid(args: { price: number; ceiling: number; increment: number }): number {
-  const shared = suggestBid(args);
-  const increment = args.increment > 0 ? args.increment : DEFAULT_BID_INCREMENT;
-  const oneStep = args.price + increment;
-  return oneStep <= args.ceiling ? Math.max(shared, oneStep) : shared;
-}
-
-/**
  * Cheap players whose value rose on the most recent day, best rise first.
  *
  * Strictly two conditions, as specified: at or under the ceiling, and a
@@ -153,7 +132,7 @@ export function detectOpportunities(input: RadarInput): RadarReport {
       // Against the previous day's value, which is what a percentage rise
       // means. Dividing by today's value would understate every gain.
       dailyChangePct: move.previous > 0 ? move.change / move.previous : 0,
-      suggestedBid: radarBid({
+      suggestedBid: suggestBid({
         price: listing.price,
         ceiling: input.ceiling,
         increment: listing.increment,

@@ -245,6 +245,17 @@ export function willingnessToPay(args: {
  *
  * Rounded to the increment because an off-step bid may be rejected outright,
  * and never below the asking price, which is the auction's own floor.
+ *
+ * At least one whole step, wherever the ceiling allows one. Rounding the
+ * markup down to whole steps quietly returned the asking price itself for any
+ * listing cheap enough that the percentage came to less than one step -- 12% of
+ * a 900k ask is 108k against a 250k step, so every listing under about 2.08M
+ * was being told to bid the floor. That is the one bid guaranteed to lose a
+ * contested listing, which is the rule this function exists to enforce, so the
+ * failure was worst exactly where the function looked like it was working.
+ *
+ * Where a whole step does not fit under the ceiling there is no legal bid
+ * between the two, so the ask stands rather than an offer we could not fund.
  */
 export function suggestBid(args: {
   price: number;
@@ -256,8 +267,9 @@ export function suggestBid(args: {
 
   const headroom = args.ceiling - args.price;
   const wanted = Math.min(headroom, args.price * PLACEHOLDER_MARKUP);
-  const steps = Math.floor(wanted / increment);
-  return args.price + steps * increment;
+  const steps = Math.max(1, Math.floor(wanted / increment));
+  const bid = args.price + steps * increment;
+  return bid <= args.ceiling ? bid : args.price;
 }
 
 export function runMarket(ctx: MarketContext): MarketReport {
@@ -295,13 +307,27 @@ export function runMarket(ctx: MarketContext): MarketReport {
         : null;
       const affordable = price <= ceiling && price <= spendable;
       const step = increment ?? DEFAULT_BID_INCREMENT;
-      const payUpTo = willingnessToPay({
+      const worth = willingnessToPay({
         player,
         upgrade,
         rules: ctx.rules,
         funds: spendable,
         ceiling,
       });
+      // A ceiling narrower than one bid step is a rounding artifact, not a
+      // valuation. The premium is a placeholder percentage, and on a cheap
+      // player it comes to less than the auction's own increment -- 12% of a
+      // 900k value is 108k against a 250k step -- so the bid collapsed back to
+      // the asking price and the headline read "Bid 900k for X (asking 900k)".
+      // That is the one offer guaranteed to lose a contested listing, which is
+      // the failure willingnessToPay already names for a different cause.
+      //
+      // Only for a real upgrade, and never past the ceiling or the cash: this
+      // widens what we would offer, not what we would recommend.
+      const payUpTo =
+        upgrade > 0
+          ? Math.min(Math.max(worth, price + step), ceiling, spendable)
+          : worth;
 
       return {
         player,
