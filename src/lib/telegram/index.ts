@@ -236,6 +236,17 @@ export function formatDepartures(report: AnalysisReport): string {
 }
 
 /**
+ * How many opportunities the daily message lists.
+ *
+ * Telegram rejects a message over 4096 characters outright, and this section
+ * shares one message with the XI, the action list and the departures. An
+ * unbounded list would mean the whole report fails to send on exactly the day
+ * the market is most worth reading. The list is ranked, so the cut keeps the
+ * best of them and the web page keeps the rest.
+ */
+const TELEGRAM_OPPORTUNITY_LIMIT = 5;
+
+/**
  * Cheap players whose value is rising, as a Telegram section.
  *
  * Separate from the buy list on purpose: these are bets on a price, not on the
@@ -249,8 +260,9 @@ export function formatDepartures(report: AnalysisReport): string {
 export function formatOpportunities(radar: RadarReport): string {
   if (radar.opportunities.length === 0) return "";
 
+  const shown = radar.opportunities.slice(0, TELEGRAM_OPPORTUNITY_LIMIT);
   const lines: string[] = ["", "<b>Speculation opportunities</b>"];
-  for (const o of radar.opportunities) {
+  for (const o of shown) {
     const club = o.clubName ? ` (${escapeHtml(o.clubName)})` : "";
     const pct = (o.dailyChangePct * 100).toFixed(1);
     lines.push(
@@ -263,9 +275,13 @@ export function formatOpportunities(radar: RadarReport): string {
       `   Ask ${fmtMoney(o.price)} — bid ${fmtMoney(o.suggestedBid)} (step ${fmtMoney(o.increment)})`,
     );
   }
+  const hidden = radar.opportunities.length - shown.length;
+  if (hidden > 0) {
+    lines.push(`   and ${hidden} more, on the market page.`);
+  }
   if (radar.unknownChange > 0) {
     lines.push(
-      `   ${radar.unknownChange} more cheap listing(s) had no readable value history, so they were not judged.`,
+      `   ${radar.unknownChange} more cheap listing(s) had no readable daily change, so they were not judged.`,
     );
   }
   return lines.join("\n");
