@@ -97,8 +97,7 @@ describe("needsConfirmation", () => {
     expect(needsConfirmation("sell")).toBe(true);
   });
 
-  it("does not require it for free, reversible actions", () => {
-    expect(needsConfirmation("lock")).toBe(false);
+  it("does not require it for a refresh", () => {
     expect(needsConfirmation("refresh")).toBe(false);
   });
 });

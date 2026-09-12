@@ -545,7 +545,13 @@ export class FutmondoClient {
     });
   }
 
-  /** Clause-blocks one of your own players. Free defence against steals. */
+  /**
+   * Clause-blocks one of your own players.
+   *
+   * Costs 200 mondos a player a week, so nothing in this app calls it anymore:
+   * exposure is reported as information and the budget is held. Kept only as
+   * the verified write shape — see the `mondo-writes` CI guard.
+   */
   async lockPlayer(championshipId: string, playerId: string): Promise<unknown> {
     return this.call("/1/userteam/lockplayer", { championshipId, playerId });
   }

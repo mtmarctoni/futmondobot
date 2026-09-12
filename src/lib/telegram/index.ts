@@ -135,9 +135,9 @@ export function escapeHtml(value: string): string {
 
 /**
  * @param automationNotes What the scheduled run did by itself. Passed in rather
- * than read off the report because only the caller knows: a lineup write and a
- * clause block leave no trace in any Futmondo payload, so if the message does
- * not say they happened, nothing does.
+ * than read off the report because only the caller knows: a lineup write leaves
+ * no trace in any Futmondo payload, so if the message does not say it happened,
+ * nothing does.
  */
 export function formatReport(
   report: AnalysisReport,
@@ -373,7 +373,8 @@ export function formatXI(report: AnalysisReport): string {
 
 /**
  * One button per money action, so acting takes a tap rather than opening
- * Futmondo. Lineups and clause blocks are already automated, so they get no
+ * Futmondo. The lineup is already automated, and clause blocks are never
+ * offered — blocking costs 200 mondos a player a week — so neither gets a
  * button.
  */
 export function buildActionButtons(report: AnalysisReport): InlineButton[][] {

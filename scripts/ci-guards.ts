@@ -276,6 +276,29 @@ const rules: Rule[] = [
   },
 
   {
+    name: "mondo-writes-disabled",
+    why:
+      "Hard rule 2, extended: blocking a clause now costs 200 mondos a player a week, and the policy is to " +
+      "spend none of the initial 2000 before the end of the season. lockPlayer may exist only as the verified " +
+      "wrapper — even the confirmed-tap route may not call it, so a lock button cannot be brought back by wiring.",
+    severity: "error",
+    run: (ctx) =>
+      scan(
+        ctx,
+        outside(ctx, [
+          "src/lib/futmondo/client.ts",
+          "src/lib/futmondo/client.test.ts",
+          "AGENTS.md",
+          "docs/",
+          "scripts/ci-guards.ts",
+        ]),
+        /\blockPlayer\b/,
+        () =>
+          "lockPlayer() spends 200 mondos a player a week and is intentionally uncalled; no engine, automation or telegram route may invoke it",
+      ),
+  },
+
+  {
     name: "requests-through-transport",
     why:
       "Hard rule 1: Futmondo reports failure as HTTP 200, and postEnvelope is the only code that reads " +

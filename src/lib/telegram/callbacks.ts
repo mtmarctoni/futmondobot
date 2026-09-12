@@ -12,7 +12,7 @@
  * mis-tap must never spend the budget.
  */
 
-export type CallbackVerb = "bid" | "clause" | "sell" | "lock" | "refresh";
+export type CallbackVerb = "bid" | "clause" | "sell" | "refresh";
 
 export interface CallbackAction {
   verb: CallbackVerb;
@@ -77,7 +77,6 @@ function isVerb(value: string): value is CallbackVerb {
     value === "bid" ||
     value === "clause" ||
     value === "sell" ||
-    value === "lock" ||
     value === "refresh"
   );
 }

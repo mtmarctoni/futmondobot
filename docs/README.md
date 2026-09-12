@@ -17,9 +17,10 @@ Start here depending on what you need.
 1. **Futmondo reports failure as HTTP 200**, with `answer.error: true`. Nothing
    here infers success from a status code, and neither should you.
 
-2. **The app automates only what is reversible** — setting the lineup, blocking
-   clauses. Anything that spends money needs a human tap. The boundary is
-   deliberate; see [decision 4](./DECISIONS.md).
+2. **The app automates only what is reversible** — setting the lineup. Clause
+   blocking costs 200 mondos a player a week, so it is never done; anything that
+   spends money needs a human tap. The boundary is deliberate; see
+   [decision 4](./DECISIONS.md).
 
 3. **History cannot be backfilled.** The API only reports the present, so every
    day the sync does not run is a permanent gap in the value trends that make

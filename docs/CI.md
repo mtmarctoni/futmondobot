@@ -70,6 +70,7 @@ rule it enforces when it fails.
 | `pnpm-only` | A second lockfile, or `npm`/`yarn` commands in tracked files. |
 | `no-tracked-secrets` | A tracked `.env` file, or something shaped like a token, database URL or key. |
 | `money-writes-confined` | `placeBid`, `modifyBid`, `payClause` or `putOnMarket` called anywhere but the confirmed-tap Telegram route, and the raw market endpoints outside the client. |
+| `mondo-writes-disabled` | `lockPlayer` anywhere but the verified wrapper in `client.ts` (plus its test, `AGENTS.md` prose and docs). Blocking costs 200 mondos a player a week and is intentionally uncalled — the Telegram route is excluded too, so a lock button cannot be wired back. |
 | `requests-through-transport` | The Futmondo host referenced outside `transport.ts`. Failure arrives as HTTP 200, and `postEnvelope` is the only code that reads `answer.error`. |
 | `ledger-append-only` | `DELETE FROM` or `TRUNCATE` against `transfers` or `money_events`. |
 | `dates-through-helpers` | `toISOString()` on anything but a freshly constructed `Date`, outside `repo.ts`. Date columns arrive as local-time objects and formatting one by hand reports the previous day. |

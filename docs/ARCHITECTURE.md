@@ -48,7 +48,7 @@ document follows from that.
                               │                │
                     ┌─────────┴────┐      writes back to
                     ▼              ▼        Futmondo
-                web pages     Telegram    (lineup, locks only)
+                web pages     Telegram    (lineup only)
 ```
 
 One direction, one report type. `AnalysisReport` is the single object every
@@ -184,13 +184,16 @@ and reversible parts, report the rest.
 
 The boundary is drawn on **reversibility**, not convenience:
 
-- Setting a lineup and blocking a clause cost nothing and can be undone, so they
-  run unattended.
+- Setting a lineup costs nothing and can be undone, so it runs unattended.
 - Bids, clause payments and sales spend budget irreversibly, so they only ever
   become a Telegram button needing two taps.
 - **Formation changes are never automated.** That write payload could not be
   established with confidence from the client bundle, and guessing a write shape
   risks corrupting a lineup. The app reports a better shape instead.
+- **Clause blocks are never done at all.** Blocking now costs 200 mondos a
+  player a week, so clause defence is exposure reporting only: `runClauses`
+  returns who can be taken and by whom, and nothing calls the `lockPlayer`
+  wrapper.
 
 That last point is worth preserving. Read shapes can be inferred safely because
 a wrong guess yields empty data; a wrong write guess does damage.

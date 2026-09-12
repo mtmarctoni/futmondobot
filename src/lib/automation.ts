@@ -2,12 +2,13 @@
  * The scheduled routine: work out what to do, do the free and reversible parts,
  * and report the rest.
  *
- * The split is deliberate and load-bearing. Setting a lineup and blocking a
- * clause cost nothing and can be undone, so they run unattended. Bids, clause
- * payments and sales spend budget irreversibly, so they only ever become a
- * button in Telegram.
+ * The split is deliberate and load-bearing. Setting a lineup costs nothing and
+ * can be undone, so it runs unattended. Bids, clause payments and sales spend
+ * budget irreversibly, so they only ever become a button in Telegram. Blocking
+ * a clause now costs 200 mondos a player a week, so it joins the money row:
+ * exposure is reported as information and the budget is never spent on it.
  */
-import { applyLineup, applyLocks, type ApplyLineupResult, type LockResult } from "./engine/apply";
+import { applyLineup, type ApplyLineupResult } from "./engine/apply";
 import { runAnalysis, type AnalysisReport } from "./engine";
 import { FutmondoClient } from "./futmondo/client";
 import { dbTokenStore } from "./db/token-store";
@@ -15,7 +16,6 @@ import { dbTokenStore } from "./db/token-store";
 export interface AutomationResult {
   report: AnalysisReport;
   lineup: ApplyLineupResult | null;
-  locks: LockResult | null;
   /** Why an automated step was not attempted, when it was not. */
   notes: string[];
 }
@@ -45,7 +45,7 @@ export async function runAutomation(
 
   const report = await runAnalysis({ client });
   if (report.error || !report.scope) {
-    return { report, lineup: null, locks: null, notes: [report.error ?? "No scope"] };
+    return { report, lineup: null, notes: [report.error ?? "No scope"] };
   }
 
   // ------------------------------------------------------------- lineup ----
@@ -91,31 +91,12 @@ export async function runAutomation(
     }
   }
 
-  // -------------------------------------------------------------- locks ----
-  let locks: LockResult | null = null;
-  if (report.clauses.toLock.length > 0) {
-    locks = await applyLocks({
-      client,
-      scope: report.scope,
-      exposed: report.clauses.toLock,
-      dryRun,
-    });
-    // Said out loud, always. A free, automated, reversible action that leaves
-    // no trace anywhere is indistinguishable from one that never ran -- which
-    // is exactly the state this was in: `toLock` reported fifteen players and
-    // `action_log` contained no lock row in the app's entire history.
-    if (locks.locked.length > 0) {
-      notes.push(
-        `${dryRun ? "Would block" : "Blocked"} ${locks.locked.length} clause${
-          locks.locked.length > 1 ? "s" : ""
-        }: ${locks.locked.map((l) => l.name).join(", ")}.`,
-      );
-    }
-    if (locks.skipped > 0) {
-      notes.push(`${locks.skipped} more exposed player(s) were left for the next run.`);
-    }
-    notes.push(...locks.errors);
-  } else if (report.clauses.windowNote) {
+  // ------------------------------------------------------- clauses (info) ----
+  // Blocking now costs 200 mondos a player a week, so nothing below is a write
+  // or an instruction. Exposure is carried on the clauses page and in today's
+  // headline as information; the only automation here passes the window note
+  // through, so the message states when your squad becomes clausable and stops.
+  if (report.clauses.windowNote) {
     notes.push(report.clauses.windowNote);
   }
 
@@ -124,7 +105,7 @@ export async function runAutomation(
   const applied = Boolean(lineup?.applied);
   const finalReport = applied ? await runAnalysis({ client, lineupApplied: true }) : report;
 
-  return { report: finalReport, lineup, locks, notes };
+  return { report: finalReport, lineup, notes };
 }
 
 function message(err: unknown): string {

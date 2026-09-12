@@ -199,13 +199,17 @@ export default function SettingsPage() {
         <ul className="mt-2 space-y-1.5 text-zinc-400">
           <li>
             <span className="text-zinc-200">Automatic:</span> setting the XI
-            before the deadline, and blocking clauses on exposed players. Both
-            are free and reversible.
+            before the deadline. It is free and reversible.
           </li>
           <li>
             <span className="text-zinc-200">Always your tap:</span> bids, clause
             payments and sales. These spend budget irreversibly, so they arrive
             as Telegram buttons and need a confirmation.
+          </li>
+          <li>
+            <span className="text-zinc-200">Never automatic:</span> blocking
+            clauses. It costs 200 mondos a player a week, so the app lists which
+            of your players is exposed as information and never spends on it.
           </li>
           <li>
             <span className="text-zinc-200">Never automatic:</span> changing
