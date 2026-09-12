@@ -79,8 +79,9 @@ the API or are properties of the league:
   lineup optimiser exactly optimal rather than approximate. If this league ever
   enables it, `pickLineup` needs revisiting.
 - **Captain disabled** — `/5/userteam/setcaptain` is never called.
-- **Manual clauses, no weekly cap, unlimited blocks** — this is why clause
-  attack and defence are both first-class features.
+- **Manual clauses, no weekly cap, unlimited blocks** — blocking costs 200
+  mondos a player a week, so clause attack is a first-class feature and defence
+  is exposure reporting; blocks are never spent on.
 - **Funds hidden** — this is why rival cash must be reconstructed from the
   ledger.
 - **Max offer = funds + 50% squad value** — encoded as
@@ -94,7 +95,7 @@ the API or are properties of the league:
 | Cron | Schedule | Job |
 |---|---|---|
 | `/api/cron/sync` | `0 6,14,22 * * *` | Collects history. **This is the one that makes the app better over time.** |
-| `/api/cron/deadline` | `0 9,18 * * *` | Sets the lineup, blocks clauses, sends the Telegram report. |
+| `/api/cron/deadline` | `0 9,18 * * *` | Sets the lineup, reports clauses as information, sends the Telegram report. |
 
 Adjust the expressions to your league's kickoff pattern. Two things to keep in
 mind:

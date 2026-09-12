@@ -5,6 +5,8 @@
  * missing: 55 "take this clause now" candidates and 15 "block this now"
  * recommendations, on a day when no clause in the league could be paid by
  * anybody, and with an audit log containing no lock row in the app's history.
+ * Blocking now costs 200 mondos a player a week, so defence is exposure
+ * information only and there is no "recommended block" in the report to test.
  */
 import { describe, expect, it } from "vitest";
 import type { RivalFunds } from "../db/repo";
@@ -128,7 +130,7 @@ describe("runClauses and the clause window", () => {
     expect(report.pendingSteals).toHaveLength(0);
   });
 
-  it("does not recommend blocking a player nobody can take today", () => {
+  it("keeps a player whose window has not opened as exposure information, not a target", () => {
     const mine = player({
       playerId: "mine",
       clausePrice: 5_000_000,
@@ -138,14 +140,14 @@ describe("runClauses and the clause window", () => {
       context({ allPlayers: [mine], squad: [mine], starterIds: new Set(["mine"]) }),
     );
 
-    expect(report.toLock).toHaveLength(0);
-    // But it must say when that changes, so the block happens before the
-    // window opens rather than after.
+    expect(report.exposed[0].availableFrom).toBe(OPENS_LATER);
+    // The window note must say when the date changes, so a deadline is not a
+    // surprise — but it does not say "block before then".
     expect(report.windowNote).toMatch(/None of your squad can be claused until/);
     expect(report.windowNote).toContain("2026-09-07");
   });
 
-  it("recommends blocking once the window is open and a rival can pay", () => {
+  it("lists an open, affordable player as exposed once the window has opened", () => {
     const mine = player({
       playerId: "mine",
       clausePrice: 5_000_000,
@@ -155,11 +157,14 @@ describe("runClauses and the clause window", () => {
       context({ allPlayers: [mine], squad: [mine], starterIds: new Set(["mine"]) }),
     );
 
-    expect(report.toLock.map((e) => e.player.playerId)).toEqual(["mine"]);
+    const exposed = report.exposed.find((e) => e.player.playerId === "mine");
+    expect(exposed).toBeDefined();
+    expect(exposed?.availableFrom).toBeNull();
+    expect(exposed?.threats.length).toBeGreaterThan(0);
     expect(report.windowNote).toBeNull();
   });
 
-  it("does not recommend blocking a player no rival can afford", () => {
+  it("does not list a player no rival can afford as exposed", () => {
     const mine = player({
       playerId: "mine",
       clausePrice: 90_000_000,
@@ -168,7 +173,7 @@ describe("runClauses and the clause window", () => {
     const report = runClauses(
       context({ allPlayers: [mine], squad: [mine], starterIds: new Set(["mine"]) }),
     );
-    expect(report.toLock).toHaveLength(0);
+    expect(report.exposed[0].threats).toHaveLength(0);
     expect(report.exposed[0].reason).toMatch(/no rival is estimated/);
   });
 });
@@ -181,8 +186,9 @@ describe("runClauses and lock observability", () => {
   });
 
   it("treats a player we have already blocked as blocked", () => {
-    // No payload carries lock state, so our own audit log is the only record.
-    // Without this the same top targets are re-locked every single day.
+    // No payload carries lock state, so our own audit log is the only record
+    // that a block ever existed. It now feeds the blocked badge only: the
+    // engine no longer writes locks, so there is no re-locking to guard.
     const report = runClauses(
       context({
         allPlayers: [mine],
@@ -192,12 +198,11 @@ describe("runClauses and lock observability", () => {
       }),
     );
 
-    expect(report.toLock).toHaveLength(0);
     expect(report.exposed[0].alreadyLocked).toBe(true);
     expect(report.exposed[0].reason).toBe("Blocked, so safe.");
   });
 
-  it("still blocks a player with no lock row", () => {
+  it("is not treated as blocked in the absence of a lock row", () => {
     const report = runClauses(
       context({
         allPlayers: [mine],
@@ -206,7 +211,8 @@ describe("runClauses and lock observability", () => {
         lockedPlayerIds: new Set(["somebody-else"]),
       }),
     );
-    expect(report.toLock.map((e) => e.player.playerId)).toEqual(["mine"]);
+    expect(report.exposed[0].alreadyLocked).toBe(false);
+    expect(report.exposed[0].threats.length).toBeGreaterThan(0);
   });
 });
 

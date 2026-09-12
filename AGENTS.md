@@ -37,8 +37,10 @@ These are load-bearing. Breaking one produces a bug that is expensive and quiet.
 2. **Never automate an action that spends money.** Bids, clause payments and
    sales are irreversible. They may only ever reach Futmondo from an explicit
    human tap, confirmed twice, with affordability re-checked against live funds
-   at the moment of execution. Lineups and clause blocks are automated precisely
-   because they are free and reversible.
+   at the moment of execution. Lineups are automated precisely because they are
+   free and reversible. Clause blocks are **not**: blocking now costs 200
+   mondos a player a week and nothing in the engine, the automation or the
+   Telegram route ever calls `lockPlayer`.
 
 3. **Never guess a write payload.** Read shapes can be inferred safely; a wrong
    write can corrupt a lineup or spend budget. This is why formation changes are
@@ -111,10 +113,14 @@ These are load-bearing. Breaking one produces a bug that is expensive and quiet.
 
 - **Nothing reports whether a clause is blocked.** The clause object is
   `{price, date, transferred, suggestedClause}` in every payload that has one.
-  So the lock automation cannot observe the effect of its own write, and
-  `action_log` is the only record that a block exists — weaker than a reading,
-  because a rival's clause payment could clear it silently. Do not "fix" this
-  by assuming a lock succeeded permanently.
+  So a block cannot be verified, and `action_log` is the only record that one
+  exists — weaker than a reading, because a rival's clause payment could clear
+  it silently. Blocking also now costs 200 mondos a player a week, so this
+  unobservable, budget-eating write is deliberately uncalled: the "blocked"
+  badge on the clauses page reads `getLockedPlayerIds` history for display
+  only, and `runClauses` never returns a block target. Do not "fix" the
+  observability gap by assuming a lock succeeded, or by calling `lockPlayer`
+  anywhere but the guarded wrapper in `client.ts`.
 
 - **A clause has a date before which nobody can pay it**, in either direction.
   Read `clause.date`; never derive it. Drafted players get acquisition + 5 days
@@ -181,16 +187,17 @@ These are load-bearing. Breaking one produces a bug that is expensive and quiet.
 ## Verify before claiming done
 
 ```bash
-pnpm verify     # typecheck, lint, guards, 185 unit tests. No network
+pnpm verify     # typecheck, lint, guards, 347 unit tests. No network
 pnpm build
-pnpm db:smoke   # 29 checks against the real database
+pnpm db:smoke   # 37 checks against the real database
 ```
 
 `pnpm guards` (inside `pnpm verify`) enforces the hard rules above as something
 a machine can refuse: money-spending calls confined to the confirmed-tap route,
-the ledger append-only, dates only through `isoDay`/`isoInstant`, no `any`, no
-committed `.only`, migrations forward-only, and a changed `pick()` lookup in
-`parse.ts` requiring a test change. Each failure prints the rule it enforces.
+`lockPlayer` banned everywhere but its verified wrapper, the ledger append-only,
+dates only through `isoDay`/`isoInstant`, no `any`, no committed `.only`,
+migrations forward-only, and a changed `pick()` lookup in `parse.ts` requiring
+a test change. Each failure prints the rule it enforces.
 **If a guard is wrong for your change, say so in the pull request and change the
 rule in the same commit; do not work around it.**
 

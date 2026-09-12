@@ -1291,14 +1291,13 @@ export async function logAction(entry: {
 }
 
 /**
- * Players we have successfully clause-blocked, from our own audit log.
+ * Players we have previously clause-blocked, from our own audit log.
  *
- * A poor substitute for a reading and used only because no reading exists: the
- * clause object is `{price, date, transferred, suggestedClause}` in every
- * payload that carries one, with no `locked` field anywhere. So the engine
- * could never observe the effect of its own write, `alreadyLocked` was
- * permanently false, and `applyLocks` would have re-locked the same top five
- * targets every day forever while never reaching the rest of the squad.
+ * Blocking now costs 200 mondos a player a week, so the engine no longer
+ * writes locks — this is history for the "blocked" badge on the clauses page.
+ * It is a poor substitute for a reading and used only because no reading
+ * exists: the clause object is `{price, date, transferred, suggestedClause}`
+ * in every payload that carries one, with no `locked` field anywhere.
  *
  * A rival's clause payment or an admin recalculation could clear a block
  * without leaving any trace here, so this can be wrong in the dangerous

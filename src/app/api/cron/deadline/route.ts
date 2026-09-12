@@ -8,8 +8,8 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 /**
- * The decision cron: set the lineup, block exposed clauses, then send the
- * remaining money decisions to Telegram as buttons.
+ * The decision cron: set the lineup, then send the remaining money decisions
+ * to Telegram as buttons.
  */
 export async function GET(req: NextRequest) {
   if (!isAuthorizedRequest(req)) {
@@ -26,8 +26,8 @@ export async function GET(req: NextRequest) {
   let notifyError: string | null = null;
   try {
     // Telegram failing must not hide that the lineup was written.
-    // The notes are how a lineup write and a clause block become visible: they
-    // leave no trace in any Futmondo payload.
+    // The notes are how a lineup write becomes visible: it leaves no trace in
+    // any Futmondo payload.
     ({ sent } = await sendReport(result.report, result.notes));
   } catch (err) {
     notifyError = err instanceof Error ? err.message : String(err);
@@ -40,7 +40,6 @@ export async function GET(req: NextRequest) {
     notifyError,
     headline: result.report.today.headline,
     lineup: result.lineup,
-    locks: result.locks,
     notes: result.notes,
   });
 }

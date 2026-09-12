@@ -91,7 +91,6 @@ const NO_CLAUSES: ClauseReport = {
   steals: [],
   pendingSteals: [],
   exposed: [],
-  toLock: [],
   trendBets: [],
   windowNote: null,
   headline: "",
@@ -272,13 +271,12 @@ describe("listing actions", () => {
 });
 
 describe("clause window action", () => {
-  it("says when the squad becomes clausable, so the block precedes it", () => {
+  it("says when the squad becomes clausable, so the window is not a surprise", () => {
     const { actions } = buildToday(
       input({
         clauses: {
           ...NO_CLAUSES,
-          windowNote:
-            "None of your squad can be claused until 2026-09-07 18:05Z. Block before then, not after.",
+          windowNote: "None of your squad can be claused until 2026-09-07 18:05Z.",
         },
       }),
     );

@@ -672,7 +672,9 @@ async function loadHistory(): Promise<History> {
   );
 
   // No payload carries clause-lock state, so our own audit log is the only
-  // record that a block exists. See ClauseContext.lockedPlayerIds and OPEN-7.
+  // record that a block ever existed. The engine no longer writes locks —
+  // blocking costs 200 mondos a player a week — so this is purely the "blocked"
+  // badge on the clauses page. See ClauseContext.lockedPlayerIds and OPEN-7.
   const lockedPlayerIds = await safe(
     () => repo.getLockedPlayerIds(),
     new Set<string>(),

@@ -126,8 +126,8 @@ export function RivalsClient({ initial }: { initial: AnalysisReport }) {
 
       <p className="text-xs text-zinc-500">
         Why it matters: a rival who cannot afford your player&apos;s clause is
-        not a threat, so this is what decides which of your players are worth
-        blocking.
+        not a threat, so this is what decides which of your players are at
+        risk.
       </p>
 
       <Warnings warnings={data.warnings} />

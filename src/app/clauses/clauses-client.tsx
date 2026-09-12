@@ -19,8 +19,9 @@ import {
 
 /**
  * Clauses run in both directions, so the page does too: what you can take, and
- * what can be taken from you. In a league with unlimited blocking, the defence
- * half is the part most often left unplayed.
+ * what can be taken from you. Blocking now costs 200 mondos a player a week,
+ * so the defence half is information, not advice: who could take your players
+ * is listed, and no block is recommended, automated or offered as a button.
  */
 export function ClausesClient({ initial }: { initial: AnalysisReport }) {
   const { data, loading, error, refresh } = useAnalysis(initial);
@@ -49,8 +50,7 @@ export function ClausesClient({ initial }: { initial: AnalysisReport }) {
       {clauses.windowNote && (
         <p className="rounded-lg border border-sky-900/50 bg-sky-950/20 px-3 py-2 text-sm text-sky-200">
           {clauses.windowNote} A clause has a date before which nobody can pay
-          it, in either direction — so there is nothing to take and nothing to
-          defend until then.
+          it, in either direction — so there is nothing to take until then.
         </p>
       )}
 
@@ -196,7 +196,7 @@ export function ClausesClient({ initial }: { initial: AnalysisReport }) {
 
       <Card
         title="Yours at risk"
-        subtitle="Blocking costs nothing and this league allows unlimited blocks."
+        subtitle="Who a rival could take right now. Blocking costs 200 mondos a player a week, so the budget is held instead — this list informs, it does not advise."
       >
         {atRisk.length === 0 ? (
           <Empty>

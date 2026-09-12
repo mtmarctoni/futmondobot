@@ -11,9 +11,9 @@ reversibility rather than convenience.
 
 | | What | Why |
 |---|---|---|
-| **Automatic** | Set the starting XI. Block clauses on exposed players. | Both cost nothing and can be undone at will. A wrong XI can be changed again before kickoff; a block is lifted with one call. |
+| **Automatic** | Set the starting XI. | Free and reversible. A wrong XI can be changed again before kickoff. |
 | **One tap in Telegram** | Bid, pay a clause, sell a player. | Irreversible. A bug in a price calculation would spend real budget with no way back, so a human always presses the button — twice. |
-| **Never automatic** | Change formation. | The formation-write payload could not be verified from Futmondo's client. Guessing a write shape risks corrupting the lineup, so the app reports "switch to 3-4-3 for +2.1 pts" and leaves it to you. |
+| **Never automatic** | Change formation. Block clauses. | Formation: the write payload could not be verified from Futmondo's client, and a wrong write can corrupt the lineup, so the app reports "switch to 3-4-3 for +2.1 pts" and leaves it to you. Clauses: blocking now costs 200 mondos a player a week, so the app reports who a rival could take and spends nothing. |
 
 A money action is confirmed twice: the first tap produces a button that spells
 out the amount, the second executes. Before executing, affordability is
@@ -301,21 +301,21 @@ from `/1/player/summary`, one call per player, which is why it is collected in
 batches on a slower schedule; the same call supplies `suggestedClause`,
 Futmondo's own idea of a fair price, which is roughly half what owners set.
 
-**Defence.** Blocking costs nothing and removes a player from every rival's
-list. The app blocks players who are attractively priced, affordable to at least
-one rival, and actually takeable today. When nothing is takeable yet it says
-when that changes, so the block happens before the window opens rather than
-after.
+**Defence.** Blocking a clause now costs 200 mondos a player a week, so the app
+does not recommend or automate it: defence is reporting who could be taken. It
+lists our players who are attractively priced, affordable to at least one rival,
+and actually takeable today, with the rival who would pay for each; a player
+whose clause price no rival's estimated funds reach is reported with that reason.
+When nothing is takeable yet it says when that changes, so the window is not a
+surprise. It never says "block this".
 
 **The app cannot see whether a block worked.** No Futmondo payload carries lock
 state anywhere, so the only record that a block exists is our own `action_log`,
-and `runClauses` reads it back to avoid re-blocking the same player daily. That
-is weaker than a reading — a rival's clause payment could clear a block with no
-trace here — and it is why every automated block is now stated explicitly in the
-Telegram report. A free, reversible, automated action that leaves no trace
-anywhere is indistinguishable from one that never ran, which is exactly the
-state this was in: fifteen players reported as needing a block, and not one lock
-row in the app's entire history.
+and that is weaker than a reading — a rival's clause payment could clear a block
+with no trace here. The blocked badge on the clauses page reads that history for
+display only; nothing writes a block, because blocking costs 200 mondos a player
+a week and the budget is held. That leaves the state this was in: fifteen players
+reported as needing a block, and not one lock row in the app's entire history.
 
 ## Rival funds, and why they are an estimate
 
@@ -338,7 +338,7 @@ up over many syncs and some old rows may never appear.
 fewer than five known transfers are flagged in the UI.
 
 It matters because a rival who cannot afford your player's clause is not a
-threat, so this is what decides which of your players are worth blocking.
+threat, so this is what decides which of your players are exposed.
 
 ## Today's action list
 
@@ -350,7 +350,8 @@ threat, so this is what decides which of your players are worth blocking.
 3. A player who has left the competition, because the loss compounds daily.
 4. A bid standing against one of our own listings and closing soon, because it
    expires rather than waiting for the next report.
-5. A clause block, because it is free.
+5. The clause-window note, because a clause that opens in two days is worth
+   planning for.
 6. A clause steal, weighted by the upgrade.
 7. Up to three buys, then a sell.
 

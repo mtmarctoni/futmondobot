@@ -66,14 +66,16 @@ analysis becomes hand-written JS and the repo grows unbounded) and Vercel Blob
 **Context.** The user's goal is spending less time on the game. Maximum time
 saving would mean automating bids and clause payments too.
 
-**Decision.** Automate setting the lineup and blocking clauses. Keep bids,
-clause payments and sales as Telegram buttons requiring two taps, with
-affordability re-checked against live funds at execution.
+**Decision.** Automate setting the lineup. Keep bids, clause payments and sales
+as Telegram buttons requiring two taps, with affordability re-checked against
+live funds at execution. *Clause blocking was originally automated here too and
+is no longer done at all — see (24) below.*
 
 **Reasoning.** The boundary is reversibility, not convenience. A wrong XI can be
-changed again before kickoff and a block lifted with one call, so a bug costs
-nothing. A wrong bid spends real budget with no way back, and this app computes
-prices from an inferred API and an estimated model.
+changed again before kickoff, so a bug costs nothing. A wrong bid spends real
+budget with no way back, and this app computes prices from an inferred API and
+an estimated model. Blocking turned out not to be free either: it now costs 200
+mondos a player a week, since superseded.
 
 **Consequences.** Still requires a few taps a week. Judged the right trade for
 money that cannot be recovered. The user was offered full automation and chose
@@ -190,7 +192,7 @@ app says it.
 
 **Context.** The league hides rival funds. Knowing who can afford a clause is
 the decisive information edge — it determines both which steals are contested
-and which of our own players need blocking.
+and which of our own players are exposed to a clause.
 
 **Decision.** Derive `budget - spent + received + prizes` from the transfer
 ledger and prize events. Present it as an estimate, show the working, and flag
@@ -391,29 +393,36 @@ end-of-local-day + 2 for bought ones — so any rule reconciling them would be a
 guess. Rule 3 forbids guessing a write payload; the same caution applies to a
 rule deciding whether to spend five million euros.
 
-**Consequences.** Steal and block advice goes quiet for the first days after a
+**Consequences.** Steal and exposure advice goes quiet for the first days after a
 draft. That is correct: nothing was takeable. The window note keeps it from
 reading as "nothing to plan".
 
 ---
 
-## 24. Treat our own audit log as the record of a clause block
+## 24. Never write a clause block — it costs 200 mondos a player a week
 
-**Decision.** `runClauses` reads successful `lock` rows from `action_log` and
-treats those players as blocked.
+*Supersedes the original "treat action_log as the record of a clause block".*
 
-**Reasoning.** No Futmondo payload carries lock state — the clause object is
-exactly `{price, date, transferred, suggestedClause}` everywhere it appears. So
-the engine cannot observe the effect of its own write, `alreadyLocked` was
-permanently false, and with a cap of five the same top five targets would have
-been re-locked every day forever while the other ten were never reached.
+**Decision.** No code anywhere calls `lockPlayer`. `getLockedPlayerIds` reads
+successful `lock` rows from `action_log` for the "blocked" badge on the clauses
+page and nothing else. Clause defence is exposure reporting: who can take one of
+our players today, and by whom.
 
-**Consequences.** This can be wrong in the dangerous direction: a rival's clause
-payment or an admin recalculation clears a block with no trace here, and we
-would believe a player is protected who is not. It is bounded to recent history
-for that reason, and every automated block is now stated in the Telegram report
-so the action is at least visible. If lock state ever becomes readable, that
-reading should replace this outright.
+**Original reasoning, and why it changed.** No Futmondo payload carries lock
+state — the clause object is exactly `{price, date, transferred,
+suggestedClause}` everywhere it appears — so `alreadyLocked` was permanently
+false and the engine could not observe its own write. Blocking then also started
+costing 200 mondos a player a week. At that price the observability gap and the
+budget bleed land in the same place: an unobservable write that eats the budget
+is one you simply do not make. Nothing to verify, nothing to cap, nothing to
+re-read for a second opinion.
+
+**Consequences.** The app no longer offers a block, automates one, or gives
+blocks a Telegram button. The badge is historical display only, and a rival can
+still take a cheap player the day their funds allow — exactly as if we never
+owned the write at all. If block state ever becomes readable and the price ever
+drops, that reading replaces the badge outright. Until then, blocking stays a
+manual human decision.
 
 ---
 

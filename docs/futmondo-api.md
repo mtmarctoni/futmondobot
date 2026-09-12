@@ -157,7 +157,7 @@ The same values appear twice: at the top level and again under
 | `enablingClause` | Days before a clause can be paid | 2 — but **do not derive `clause.date` from it**, see below |
 | `dspct` | Direct-sell share of value | 0.8. A guaranteed floor under any sale |
 | `mnmp` | Minimum listing price, as a share of value | 0.5 |
-| `blc` | Clause blocking enabled | The lock automation is legal here |
+| `blc` | Clause blocking enabled | Blocking is legal here, and costs 200 mondos a player a week — the wrapper exists, nothing calls it |
 
 Not decoded, and nothing should be built on them until observed: `usersToRank`,
 `mbp`/`vmb` (both 3 — possibly a cap on simultaneous bids), `ccr`, `mcpw`,
@@ -209,8 +209,10 @@ as flat values fails silently:
 - **`clause` has no `locked` field.** It is exactly
   `{price, date, transferred, suggestedClause}`, here and in
   `/1/player/summary`. Nothing anywhere reports whether a clause is blocked, so
-  the engine cannot observe the effect of its own `lockplayer` write and has to
-  treat its own `action_log` as the record. See OPEN-7.
+  a block cannot be verified and `action_log` is the only record one exists.
+  Blocking also costs 200 mondos a player a week, so this unobservable write is
+  deliberately uncalled: the "blocked" badge reads `getLockedPlayerIds` history
+  for display only and `lockPlayer` (see below) is never invoked. See OPEN-7.
 
 #### `status` — the availability marker nobody was reading
 
@@ -320,7 +322,7 @@ value, so it is read per candidate rather than assumed.
 | `/1/player/summary` | `{championshipId, playerId, userteamId}` | `answer.data.slug`, **`answer.championship.clause.price`**, plus `answer.points[]`, `answer.prices[]`, `answer.owners[]` and `answer.match` |
 | `/1/market/rosterclause` | `{championshipId, player_id, player_slug, price, userteamId}` | Pay a clause and take the player |
 | `/1/market/renewclause` | `{championshipId, player_id, userteamId}` | Raise your own player's clause |
-| `/1/userteam/lockplayer` | `{championshipId, playerId}` | **Block a clause on your own player** |
+| `/1/userteam/lockplayer` | `{championshipId, playerId}` | **Block a clause on your own player — 200 mondos a player a week.** The wrapper exists in `client.ts` (verified shape) but nothing calls it by design |
 | `/5/userteam/unlockplayer` | `{championshipId, playerId}` | |
 | `/5/market/recalculateclauses` | `{championshipId}` | Admin |
 | `/5/market/recoverclause` | `{championshipId, userteamId}` | Admin |

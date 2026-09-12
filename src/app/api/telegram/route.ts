@@ -97,7 +97,7 @@ const HELP = [
   "/funds — your money and the rivals' estimated cash",
   "/log — the last automated actions",
   "",
-  "Lineups and clause blocks happen automatically. Bids, clause payments and sales always need your tap.",
+  "The lineup is set automatically. Bids, clause payments and sales always need your tap.",
 ].join("\n");
 
 async function handleCommand(chat: number, text: string): Promise<void> {
@@ -290,7 +290,7 @@ async function execute(chat: number, action: CallbackAction): Promise<void> {
 
   // Re-check affordability now rather than trusting a price from a message
   // that may be hours old and predate other spending.
-  if (action.verb !== "sell" && action.verb !== "lock") {
+  if (action.verb !== "sell") {
     const info = await client.getUserTeamInformation(scope);
     if (price > info.funds) {
       await sendMessage(
@@ -333,10 +333,6 @@ async function execute(chat: number, action: CallbackAction): Promise<void> {
       case "sell":
         await client.putOnMarket(scope, { playerId, price });
         await sendMessage(chat, `✓ Listed for ${fmtMoney(price)}.`);
-        break;
-      case "lock":
-        await client.lockPlayer(scope.championshipId, playerId);
-        await sendMessage(chat, "✓ Clause blocked.");
         break;
       default:
         return;

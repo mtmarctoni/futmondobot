@@ -1,17 +1,15 @@
 /**
  * Write actions.
  *
- * Two things are automated, chosen because both are cheap to get wrong and
- * trivial to undo:
- *
- *   - Setting the lineup. Costs nothing, and a wrong XI can be changed again
- *     before kickoff.
- *   - Blocking a clause on our own player. Costs nothing and is reversible
- *     with /5/userteam/unlockplayer.
+ * One thing is automated, chosen because it is cheap to get wrong and trivial
+ * to undo: setting the lineup. It costs nothing, and a wrong XI can be changed
+ * again before kickoff.
  *
  * Everything that spends money — bids, clause payments, sales — stays manual
  * by design. Those are irreversible, and a bug in a price calculation would
- * spend real budget with no way back.
+ * spend real budget with no way back. Blocking a clause on our own player
+ * also spends — 200 mondos a player a week — so it is treated like any other
+ * spend: exposure is reported as information and never written automatically.
  *
  * One deliberate limitation: the automated writer never changes formation.
  * Futmondo's formation-change payload could not be established with certainty
@@ -23,7 +21,6 @@ import * as repo from "../db/repo";
 import type { FutmondoClient, Scope } from "../futmondo/client";
 import { FutmondoError } from "../futmondo/errors";
 import type { CurrentLineup } from "../futmondo/types";
-import type { ExposedPlayer } from "./clauses";
 import { parseFormation, pickLineup, type Formation, type LineupPick } from "./lineup";
 import type { Evaluated } from "./types";
 
@@ -243,79 +240,6 @@ function planMoves(current: CurrentLineup, pick: LineupPick): PlannedMove[] {
   }
 
   return moves.sort((a, b) => b.gain - a.gain);
-}
-
-export interface LockResult {
-  locked: { playerId: string; name: string; reason: string }[];
-  /** Targets skipped because the cap was reached, so the report can say so. */
-  skipped: number;
-  errors: string[];
-}
-
-/**
- * How many clauses to block in one run.
- *
- * Was five, which was a real bug rather than a conservative default: with no
- * readable lock state the same top five targets were re-locked every day and
- * the other ten were never reached at all. A squad is fifteen players, so the
- * cap now covers one, and it exists only to bound a runaway loop.
- */
-const MAX_LOCKS_PER_RUN = 20;
-
-/**
- * Blocks clauses on the players most worth protecting. Free, reversible, and
- * unlimited in this league, so the only judgement is which players are
- * genuinely exposed.
- *
- * Note what this cannot do: verify its own work. No payload anywhere carries a
- * `locked` field, so a successful write here is the only evidence a block
- * exists, and `action_log` is where that evidence lives. `runClauses` reads it
- * back through `lockedPlayerIds`. See OPEN-7.
- */
-export async function applyLocks(args: {
-  client: FutmondoClient;
-  scope: Scope;
-  exposed: ExposedPlayer[];
-  max?: number;
-  dryRun?: boolean;
-}): Promise<LockResult> {
-  const { client, scope, exposed, max = MAX_LOCKS_PER_RUN, dryRun = false } = args;
-  const result: LockResult = { locked: [], skipped: 0, errors: [] };
-
-  const eligible = exposed.filter((e) => !e.alreadyLocked && e.threats.length > 0);
-  const targets = eligible.slice(0, max);
-  result.skipped = eligible.length - targets.length;
-
-  for (const target of targets) {
-    if (dryRun) {
-      result.locked.push({
-        playerId: target.player.playerId,
-        name: target.player.name,
-        reason: target.reason,
-      });
-      continue;
-    }
-    try {
-      await client.lockPlayer(scope.championshipId, target.player.playerId);
-      result.locked.push({
-        playerId: target.player.playerId,
-        name: target.player.name,
-        reason: target.reason,
-      });
-      await log("lock", scope, { playerId: target.player.playerId, name: target.player.name }, true);
-    } catch (err) {
-      result.errors.push(`Could not block ${target.player.name}: ${message(err)}`);
-      await log(
-        "lock",
-        scope,
-        { playerId: target.player.playerId },
-        false,
-        message(err),
-      );
-    }
-  }
-
-  return result;
 }
 
 function message(err: unknown): string {

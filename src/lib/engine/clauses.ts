@@ -1,14 +1,18 @@
 /**
  * Clauses — attack and defence.
  *
- * This league runs manual clauses with no weekly cap and unlimited blocking,
- * which makes clauses the sharpest tool available in both directions:
+ * This league runs manual clauses with no weekly cap. Blocking used to be free
+ * and a full defence half ran off that assumption; blocking now costs 200
+ * mondos a player a week, so defence is reported as information and the budget
+ * is held, not spent:
  *
  *   Attack.  A rival's player can be taken outright for their clause price,
  *            no negotiation and no bidding war. When that price is below what
  *            the player is worth in points, it is simply free value.
- *   Defence. Blocking a player costs nothing and removes them from every
- *            rival's list. Not using it is leaving the door open.
+ *   Defence. Who could take your players today is surfaced on the clauses page
+ *            and in today's headline, but no block is recommended, automated or
+ *            offered as a button. Every block is 200 mondos a week and nothing
+ *            is spent before the end of the season.
  *
  * Rival funds matter for both: a rival who cannot afford your best player is
  * not a threat, and a target owned by a rival is only worth chasing if we can
@@ -82,8 +86,6 @@ export interface ClauseReport {
    */
   pendingSteals: StealCandidate[];
   exposed: ExposedPlayer[];
-  /** Players we should lock, most urgent first. */
-  toLock: ExposedPlayer[];
   /**
    * Rival players whose value is rising while their clause stays pinned. A
    * bet on forward value, not a current discount — see the threshold block.
@@ -91,8 +93,9 @@ export interface ClauseReport {
    */
   trendBets: ClauseBet[];
   /**
-   * Set when nothing of ours is clausable yet, naming the date it changes, so
-   * the block happens before the window opens rather than after.
+   * Set when none of our squad is clausable yet, naming the date it changes.
+   * Informational: blocking costs 200 mondos a player a week, so nothing is
+   * advised or pending from this state.
    */
   windowNote: string | null;
   headline: string;
@@ -110,15 +113,16 @@ export interface ClauseContext {
   rivalFunds: RivalFunds[];
   teamNames: Map<string, string | null>;
   /**
-   * Players we have successfully locked before, from `action_log`.
+   * Players we have ever locked, from `action_log`.
    *
-   * This is a weaker signal than a reading and the difference matters: no
-   * payload anywhere carries a `locked` field, so the engine cannot observe the
-   * effect of its own write. A rival's clause payment or an admin recalculation
-   * could clear a block without producing any evidence here, in which case we
-   * would believe a player is protected who is not. It is still far better than
-   * the alternative, which was re-locking the same five players every day
-   * forever and never reaching the other ten. See BUG-4 / OPEN-7.
+   * The engine no longer writes locks — blocking costs 200 mondos a player a
+   * week — so this is history for the "blocked" badge on the clauses page. It
+   * is a weaker signal than a reading and the difference matters: no payload
+   * anywhere carries a `locked` field, so the engine could never observe the
+   * effect of its own write. A rival's clause payment or an admin
+   * recalculation could clear a block without producing any evidence here, in
+   * which case we would believe a player is protected who is not. See BUG-4 /
+   * OPEN-7.
    */
   lockedPlayerIds?: ReadonlySet<string>;
   now?: Date;
@@ -200,12 +204,6 @@ export function runClauses(ctx: ClauseContext): ClauseReport {
   const pendingSteals = allSteals.filter((s) => s.availableFrom !== null);
 
   const exposed = findExposed(ctx, now);
-  const toLock = exposed
-    // A player nobody can take today is not exposed today. Locking him would
-    // still be free, but it would also be indistinguishable from noise, and the
-    // report would carry the same fifteen names every day forever.
-    .filter((e) => e.availableFrom === null && !e.alreadyLocked && e.threats.length > 0)
-    .sort((a, b) => b.efficiency - a.efficiency);
 
   const trendBets = findClauseBets(ctx, ceiling, now);
 
@@ -213,19 +211,17 @@ export function runClauses(ctx: ClauseContext): ClauseReport {
     steals,
     pendingSteals,
     exposed,
-    toLock,
     trendBets,
     windowNote: windowNote(exposed),
-    headline: headline(steals, pendingSteals, toLock, ceiling),
+    headline: headline(steals, pendingSteals, exposed, ceiling),
   };
 }
 
 /**
- * When nothing of ours is takeable yet, say when that changes.
+ * When none of ours is takeable yet, say when that changes.
  *
- * Silence here would be the wrong kind of quiet: a squad that becomes clausable
- * on Sunday evening needs blocking before Sunday evening, and "no exposure"
- * reads as "nothing to plan".
+ * This is information only: blocking is no longer advised or automated, so the
+ * sentence simply names the date the window opens.
  */
 function windowNote(exposed: ExposedPlayer[]): string | null {
   const pending = exposed.filter((e) => e.availableFrom !== null);
@@ -234,7 +230,7 @@ function windowNote(exposed: ExposedPlayer[]): string | null {
   const earliest = pending
     .map((e) => e.availableFrom as string)
     .sort()[0];
-  return `None of your squad can be claused until ${formatWhen(earliest)}. Block before then, not after.`;
+  return `None of your squad can be claused until ${formatWhen(earliest)}.`;
 }
 
 function formatWhen(iso: string): string {
@@ -579,16 +575,23 @@ function exposureReason(args: {
 function headline(
   steals: StealCandidate[],
   pendingSteals: StealCandidate[],
-  toLock: ExposedPlayer[],
+  exposed: ExposedPlayer[],
   ceiling: number,
 ): string {
   const topSteal = steals.find((s) => s.affordable);
-  const topRisk = toLock[0];
+  // A player nobody can take today is not exposed today. The unaffordable and
+  // not-yet-open cases are surfaced in the full list; the headline names only
+  // the immediately takeable risk, and as information, never as an instruction.
+  const topRisk = exposed.find(
+    (e) => e.availableFrom === null && !e.alreadyLocked && e.threats.length > 0,
+  );
 
   if (topSteal && topRisk) {
     return `Take ${topSteal.player.name} for ${fmtMoney(topSteal.clausePrice)} (+${topSteal.upgrade.toFixed(
       1,
-    )} pts/round), and block ${topRisk.player.name} before someone does the same to you.`;
+    )} pts/round). ${topRisk.player.name} is exposed at ${fmtMoney(
+      topRisk.clausePrice,
+    )} — blocking costs 200 mondos a player a week, so the budget is held, not spent.`;
   }
   if (topSteal) {
     return `Take ${topSteal.player.name} for ${fmtMoney(topSteal.clausePrice)}: ${topSteal.upgrade.toFixed(
@@ -596,7 +599,9 @@ function headline(
     )} pts/round better than your weakest starter in that role.`;
   }
   if (topRisk) {
-    return `No steal worth making. Block ${topRisk.player.name} — ${topRisk.reason.toLowerCase()}`;
+    return `No steal worth making. ${topRisk.player.name} is exposed at ${fmtMoney(
+      topRisk.clausePrice,
+    )}; blocking costs 200 mondos a week and nothing is spent before the end of the season.`;
   }
   const pending = pendingSteals.find((s) => s.affordable);
   if (pending) {

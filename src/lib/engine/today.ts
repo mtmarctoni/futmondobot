@@ -2,11 +2,11 @@
  * The one screen worth reading: what to do right now, in order.
  *
  * Ordering is by consequence, not by category. A lineup with an injured
- * starter in it costs points this week and outranks any transfer; a clause
- * block costs nothing and is therefore always worth doing; a marginal buy can
- * wait. Anything that needs no action is deliberately not listed.
+ * starter in it costs points this week and outranks any transfer; a listing
+ * bid with a clock on it outranks a marginal buy; a buy can wait. Anything
+ * that needs no action is deliberately not listed.
  */
-import type { ClauseReport, ClauseBet, ExposedPlayer, StealCandidate } from "./clauses";
+import type { ClauseReport, ClauseBet, StealCandidate } from "./clauses";
 import type { DepartedPlayer } from "./departed";
 import type { LineupChange, LineupPick } from "./lineup";
 import type { MarketReport, OwnListing } from "./market";
@@ -14,7 +14,6 @@ import { fmtMoney, paysForPoints, type LeagueRules } from "./types";
 
 export type ActionKind =
   | "set_lineup"
-  | "lock_player"
   | "steal_clause"
   | "clause_bet"
   | "buy"
@@ -84,7 +83,6 @@ export function buildToday(input: TodayInput): TodayReport {
   // A bid on one of our own listings has a clock on it and outranks anything
   // that will still be there tomorrow.
   actions.push(...listingActions(input.market.listings));
-  actions.push(...lockActions(input.clauses.toLock));
   actions.push(...clauseWindowActions(input.clauses));
   actions.push(...stealActions(input.clauses.steals, input.rules));
   actions.push(...clauseBetActions(input.clauses.trendBets));
@@ -193,8 +191,8 @@ function lineupActions(
 /**
  * A player who has left the competition.
  *
- * This ranks just under a broken XI and just over a clause block, because it
- * is the only problem on this list that gets worse every day it is ignored:
+ * This ranks just under a broken XI and above everything else, because it is
+ * the only problem on this list that gets worse every day it is ignored:
  * the player cannot score, and his value drifts down while the rest of the
  * league's does not. It is never automated -- listing a player moves real
  * money and stays a two-tap decision.
@@ -236,26 +234,6 @@ function departureActions(departed: DepartedPlayer[]): Action[] {
       playerName: player.name,
     };
   });
-}
-
-/**
- * Blocking is free and irreversible only in the sense that it can be undone at
- * will, so anything genuinely exposed is worth doing immediately.
- */
-function lockActions(toLock: ExposedPlayer[]): Action[] {
-  return toLock.slice(0, 3).map((risk, index) => ({
-    id: `lock-${risk.player.playerId}`,
-    kind: "lock_player" as const,
-    // Just below a broken lineup: costs nothing, prevents losing a starter.
-    weight: 88 - index,
-    urgency: "now" as const,
-    title: `Block ${risk.player.name}'s clause`,
-    detail: `${risk.reason} Blocking costs nothing and this league allows unlimited blocks.`,
-    money: 0,
-    playerId: risk.player.playerId,
-    playerName: risk.player.name,
-    automatable: true,
-  }));
 }
 
 function stealActions(steals: StealCandidate[], rules: LeagueRules): Action[] {
@@ -314,11 +292,11 @@ function clauseBetActions(trendBets: ClauseBet[]): Action[] {
 }
 
 /**
- * When the clause window has not opened yet, say when it does.
+ * When no clause in the league is payable yet, say when that changes.
  *
- * Ranked above a marginal buy and below anything urgent: it is not something to
- * do today, it is something that stops being possible if it is left until the
- * window is already open and a rival has moved first.
+ * Information only — this names a date so a deadline is not a surprise. Ranked
+ * above a marginal buy because a clause that opens in two days is worth
+ * planning for, and below anything urgent.
  */
 function clauseWindowActions(clauses: ClauseReport): Action[] {
   if (!clauses.windowNote) return [];
