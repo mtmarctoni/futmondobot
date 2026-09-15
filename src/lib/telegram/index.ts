@@ -384,7 +384,9 @@ export function buildActionButtons(report: AnalysisReport): InlineButton[][] {
     if (!action.playerId) continue;
 
     const verb: CallbackVerb | null =
-      action.kind === "steal_clause" || action.kind === "clause_bet"
+      action.kind === "steal_clause" ||
+      action.kind === "golden_clause" ||
+      action.kind === "clause_bet"
         ? "clause"
         : action.kind === "buy"
           ? "bid"

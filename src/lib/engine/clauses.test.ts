@@ -307,30 +307,13 @@ describe("findClauseBets", () => {
     expect(bet.reason).not.toMatch(/free money|giveaway|discount by any standard/i);
   });
 
-  it("states plainly when the clause already sits under value", () => {
-    const target = player({
-      playerId: "target",
-      ownerTeamId: "rival",
-      value: 12_500_000,
-      clausePrice: 10_000_000,
-      clauseDate: OPENED_ALREADY,
-      valueDelta: 4_310_000,
-      expectedPoints: 5,
-    });
-    const report = runClauses(context({ allPlayers: [target] }));
-
-    expect(report.trendBets).toHaveLength(1);
-    expect(report.trendBets[0].ratio).toBeGreaterThanOrEqual(1);
-    expect(report.trendBets[0].discount).toBe(2_500_000);
-    expect(report.trendBets[0].reason).toContain("under today's value");
-  });
-
   it("excludes players whose value is not rising", () => {
+    // Above the golden band, where the trend is the entire case for paying.
     const target = player({
       playerId: "target",
       ownerTeamId: "rival",
       value: 15_000_000,
-      clausePrice: 10_000_000,
+      clausePrice: 18_000_000,
       clauseDate: OPENED_ALREADY,
       valueDelta: 0,
       expectedPoints: 5,
@@ -447,7 +430,7 @@ describe("findClauseBets", () => {
       playerId: "target",
       ownerTeamId: "rival",
       value: 15_000_000,
-      clausePrice: 10_000_000,
+      clausePrice: 18_000_000,
       clauseDate: OPENS_LATER,
       valueDelta: 3_000_000,
       expectedPoints: 5,
@@ -460,12 +443,12 @@ describe("findClauseBets", () => {
   });
 
   it("sorts by opportunity descending", () => {
-    // B: strong trend and clause already below value -> high score
+    // B: strong trend and the smaller gap to close -> high score
     const strong = player({
       playerId: "strong",
       ownerTeamId: "rival",
       value: 12_500_000,
-      clausePrice: 10_000_000,
+      clausePrice: 14_000_000,
       clauseDate: OPENED_ALREADY,
       valueDelta: 4_310_000,
       expectedPoints: 5,
@@ -545,8 +528,9 @@ describe("findClauseBets", () => {
     expect(justBelow.trendBets).toHaveLength(0);
   });
 
-  it("caps opportunity so a huge trend cannot inflate a bet forever", () => {
-    // ratio 3 (>= 1 -> ratioScore 3) and valueDelta 9M (clamped to 4).
+  it("caps opportunity so a huge trend cannot inflate a score forever", () => {
+    // ratio 3 (>= 1 -> ratioScore 3) and valueDelta 9M (clamped to 4). A ratio
+    // that high is golden, so the capped score is read from that list.
     const huge = player({
       playerId: "huge",
       ownerTeamId: "rival",
@@ -566,8 +550,8 @@ describe("findClauseBets", () => {
       context({ allPlayers: [huge, justAtCap] }),
     );
 
-    const h = report.trendBets.find((b) => b.player.playerId === "huge");
-    const c = report.trendBets.find((b) => b.player.playerId === "justAtCap");
+    const h = report.golden.find((b) => b.player.playerId === "huge");
+    const c = report.golden.find((b) => b.player.playerId === "justAtCap");
     expect(h).toBeDefined();
     expect(c).toBeDefined();
     expect(h!.opportunity).toBe(7);
@@ -616,7 +600,7 @@ describe("findClauseBets", () => {
     const target = player({
       playerId: "target",
       ownerTeamId: "rival",
-      value: 15_000_000,
+      value: 8_500_000,
       clausePrice: 10_000_000,
       clauseDate: OPENED_ALREADY,
       valueDelta: 3_320_000,
@@ -633,5 +617,278 @@ describe("findClauseBets", () => {
     expect(report.trendBets).toHaveLength(1);
     expect(report.trendBets[0].affordable).toBe(true);
     expect(report.trendBets[0].reason).not.toMatch(/beyond the/);
+  });
+});
+
+/**
+ * The golden tier: a clause the market has already overtaken.
+ *
+ * Live data on 2026-09-14 had 174 owned players with both a clause and a
+ * value. Two sat strictly under value and two more within 2% of it, then the
+ * field fell away to 0.85 — so this is a small, nameable set, not a gradient.
+ * Every one of them was golden for the same reason: the owner priced the
+ * clause once and the market repriced the player since. They were previously
+ * scored by the same formula as a clause 30% above value, which weights the
+ * trend above the gap, so the one case where nothing has to be believed about
+ * the future ranked alongside the ones where everything does.
+ */
+describe("golden clauses", () => {
+  it("classifies a clause under value as golden rather than a forward bet", () => {
+    const target = player({
+      playerId: "target",
+      ownerTeamId: "rival",
+      value: 12_500_000,
+      clausePrice: 10_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 4_310_000,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    expect(report.golden).toHaveLength(1);
+    expect(report.golden[0].player.playerId).toBe("target");
+    expect(report.golden[0].tier).toBe("golden");
+    expect(report.golden[0].discount).toBe(2_500_000);
+    // Never in both lists: the page would render him twice, under two
+    // different claims about the same clause.
+    expect(report.trendBets).toHaveLength(0);
+  });
+
+  it("surfaces a golden clause with no rising trend behind it", () => {
+    // The trend minimum exists to stop noise being sold as a bet. A clause
+    // under value is not a bet, so the trend has nothing to say about it.
+    const target = player({
+      playerId: "flat",
+      ownerTeamId: "rival",
+      value: 15_000_000,
+      clausePrice: 10_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 0,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    expect(report.golden).toHaveLength(1);
+    expect(report.golden[0].player.playerId).toBe("flat");
+  });
+
+  it("surfaces a golden clause on a player who would not improve the XI", () => {
+    // findSteals needs an upgrade over a starter. Free value does not.
+    const target = player({
+      playerId: "bench",
+      ownerTeamId: "rival",
+      role: "DEF",
+      value: 12_000_000,
+      clausePrice: 10_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 0,
+      expectedPoints: 0.5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    expect(report.steals).toHaveLength(0);
+    expect(report.golden).toHaveLength(1);
+  });
+
+  it("treats the golden ratio as inclusive at 0.95, and a hair below stays a bet", () => {
+    const atMin = player({
+      playerId: "atMin",
+      ownerTeamId: "rival",
+      value: 9_500_000,
+      clausePrice: 10_000_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 3_000_000,
+      expectedPoints: 5,
+    });
+    const reportAt = runClauses(context({ allPlayers: [atMin] }));
+    expect(reportAt.golden).toHaveLength(1);
+    expect(reportAt.trendBets).toHaveLength(0);
+
+    const justBelow = runClauses(
+      context({
+        allPlayers: [
+          player({ ...atMin, playerId: "justBelow", value: 9_490_000 }),
+        ],
+      }),
+    );
+    expect(justBelow.golden).toHaveLength(0);
+    expect(justBelow.trendBets).toHaveLength(1);
+    expect(justBelow.trendBets[0].tier).toBe("trend");
+  });
+
+  it("orders golden by how far the clause lags value, best first", () => {
+    const lagging = player({
+      playerId: "lagging",
+      ownerTeamId: "rival",
+      value: 10_920_000,
+      clausePrice: 9_870_000,
+      clauseDate: OPENED_ALREADY,
+      expectedPoints: 5,
+    });
+    const level = player({
+      playerId: "level",
+      ownerTeamId: "rival",
+      value: 20_330_000,
+      clausePrice: 20_780_000,
+      clauseDate: OPENED_ALREADY,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [level, lagging] }));
+
+    expect(report.golden.map((g) => g.player.playerId)).toEqual([
+      "lagging",
+      "level",
+    ]);
+  });
+
+  it("puts a golden clause you can pay ahead of one you cannot", () => {
+    const rich = player({
+      playerId: "rich",
+      ownerTeamId: "rival",
+      value: 60_000_000,
+      clausePrice: 50_000_000,
+      clauseDate: OPENED_ALREADY,
+      expectedPoints: 5,
+    });
+    const cheap = player({
+      playerId: "cheap",
+      ownerTeamId: "rival",
+      value: 10_400_000,
+      clausePrice: 10_000_000,
+      clauseDate: OPENED_ALREADY,
+      expectedPoints: 5,
+    });
+    const report = runClauses(
+      context({ allPlayers: [rich, cheap], funds: 20_000_000, teamValue: 0 }),
+    );
+
+    expect(report.golden.map((g) => g.player.playerId)).toEqual([
+      "cheap",
+      "rich",
+    ]);
+    expect(report.golden[0].affordable).toBe(true);
+    expect(report.golden[1].affordable).toBe(false);
+  });
+
+  it("says the clause is under value when it is", () => {
+    const target = player({
+      playerId: "under",
+      ownerTeamId: "rival",
+      value: 10_920_000,
+      clausePrice: 9_870_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 3_380_000,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    expect(report.golden[0].reason).toContain("under his own market value");
+    expect(report.golden[0].reason).toContain("Value up 3.38M€");
+    // The payoff is here today, so the bet wording must not follow it around.
+    expect(report.golden[0].reason).not.toMatch(/pays only if value keeps rising/);
+  });
+
+  it("does not claim a discount on a clause that is level with value", () => {
+    const target = player({
+      playerId: "level",
+      ownerTeamId: "rival",
+      value: 20_330_000,
+      clausePrice: 20_780_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 5_000_000,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    expect(report.golden[0].discount).toBe(-450_000);
+    expect(report.golden[0].reason).not.toContain("under his own market value");
+    expect(report.golden[0].reason).toMatch(/over a 20.3M€ value/);
+  });
+
+  it("gates a golden clause on its date like any other", () => {
+    const target = player({
+      playerId: "pending",
+      ownerTeamId: "rival",
+      value: 15_000_000,
+      clausePrice: 10_000_000,
+      clauseDate: OPENS_LATER,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    expect(report.golden).toHaveLength(1);
+    expect(report.golden[0].availableFrom).toBe(OPENS_LATER);
+    expect(report.golden[0].reason).toMatch(/Not payable until/);
+  });
+
+  it("flags an unread clause window on a golden clause too", () => {
+    const target = player({
+      playerId: "unread",
+      ownerTeamId: "rival",
+      value: 15_000_000,
+      clausePrice: 10_000_000,
+      clauseDate: null,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    expect(report.golden[0].clauseDateKnown).toBe(false);
+    expect(report.golden[0].reason).toMatch(
+      /Clause window has not been read yet.*check the date in Futmondo before paying/,
+    );
+  });
+
+  it("excludes a blocked rival player", () => {
+    const target = player({
+      playerId: "locked",
+      ownerTeamId: "rival",
+      value: 15_000_000,
+      clausePrice: 10_000_000,
+      clauseLocked: true,
+      clauseDate: OPENED_ALREADY,
+    });
+    expect(runClauses(context({ allPlayers: [target] })).golden).toHaveLength(0);
+  });
+
+  it("excludes our own players, however badly we priced them", () => {
+    const mine = player({
+      playerId: "mine",
+      value: 15_000_000,
+      clausePrice: 10_000_000,
+      clauseDate: OPENED_ALREADY,
+    });
+    expect(runClauses(context({ allPlayers: [mine] })).golden).toHaveLength(0);
+  });
+
+  it("leads the headline with the best affordable golden clause", () => {
+    const target = player({
+      playerId: "target",
+      name: "Luismi Cruz",
+      ownerTeamId: "rival",
+      value: 20_330_000,
+      clausePrice: 20_780_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 5_000_000,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    expect(report.headline).toContain("Luismi Cruz");
+    expect(report.headline).toContain("20.8M€");
+  });
+
+  it("does not lead the headline with a golden clause nobody can pay yet", () => {
+    const target = player({
+      playerId: "target",
+      name: "Luismi Cruz",
+      ownerTeamId: "rival",
+      value: 20_330_000,
+      clausePrice: 20_780_000,
+      clauseDate: OPENS_LATER,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [target] }));
+
+    expect(report.headline).not.toMatch(/^Luismi Cruz/);
   });
 });

@@ -187,7 +187,7 @@ These are load-bearing. Breaking one produces a bug that is expensive and quiet.
 ## Verify before claiming done
 
 ```bash
-pnpm verify     # typecheck, lint, guards, 347 unit tests. No network
+pnpm verify     # typecheck, lint, guards, 368 unit tests. No network
 pnpm build
 pnpm db:smoke   # 37 checks against the real database
 ```
