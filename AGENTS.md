@@ -63,7 +63,9 @@ These are load-bearing. Breaking one produces a bug that is expensive and quiet.
 
 7. **Join on stable ids, never names.** In-game team names change when a user
    renames. `userid` is stable; `team_name_history` exists so old names stay
-   resolvable, because `/2/locker/news` identifies a team by name only.
+   resolvable, because `/2/locker/news` identifies a team by name only. Where a
+   name is the only key available, compare through `norm_name()` — Futmondo
+   trims nothing its users type, and an exact match silently drops the row.
 
 8. **Money is integer euros.** `num()` in `src/lib/futmondo/parse.ts` refuses
    separator-formatted input rather than guessing, because "1.500" is ambiguous
@@ -187,9 +189,9 @@ These are load-bearing. Breaking one produces a bug that is expensive and quiet.
 ## Verify before claiming done
 
 ```bash
-pnpm verify     # typecheck, lint, guards, 369 unit tests. No network
+pnpm verify     # typecheck, lint, guards, 374 unit tests. No network
 pnpm build
-pnpm db:smoke   # 37 checks against the real database
+pnpm db:smoke   # 39 checks against the real database
 ```
 
 `pnpm guards` (inside `pnpm verify`) enforces the hard rules above as something

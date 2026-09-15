@@ -1060,6 +1060,14 @@ export async function insertTransfers(transfers: Transfer[]): Promise<number> {
 /**
  * Money events carry only an in-game team name, so ownership is resolved
  * against current and historical names.
+ *
+ * The comparison is deliberately insensitive to case and to whitespace.
+ * Futmondo stores what its users typed and trims nothing, so a team can be
+ * "Rival FC" here and "Rival  FC " in the pressroom. An exact match would
+ * leave `team_id` null, `getRivalFunds` only sums events where it is not
+ * null, and the ledger is append-only — so one stray space would remove that
+ * prize from a rival's estimated funds for the rest of the season, with
+ * nothing anywhere reporting that it had happened.
  */
 export async function insertMoneyEvents(events: MoneyEvent[]): Promise<number> {
   if (events.length === 0) return 0;
@@ -1074,8 +1082,10 @@ export async function insertMoneyEvents(events: MoneyEvent[]): Promise<number> {
      SELECT
        i.event_id,
        COALESCE(
-         (SELECT team_id FROM teams WHERE lower(team_name) = lower(i.team_name) LIMIT 1),
-         (SELECT team_id FROM team_name_history WHERE lower(team_name) = lower(i.team_name) LIMIT 1)
+         (SELECT team_id FROM teams
+           WHERE norm_name(team_name) = norm_name(i.team_name) LIMIT 1),
+         (SELECT team_id FROM team_name_history
+           WHERE norm_name(team_name) = norm_name(i.team_name) LIMIT 1)
        ),
        i.team_name, i.amount, i.description, i.created_at
      FROM incoming i

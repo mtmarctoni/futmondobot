@@ -496,13 +496,39 @@ async function main() {
     String(resolved[0]?.team_id),
   );
 
+  // The name is the only key the pressroom gives, and Futmondo does not trim
+  // what its users typed. An equality test that is not whitespace-insensitive
+  // drops the row's team id, and the ledger is append-only, so it stays null.
+  const spaced = [
+    {
+      id: PREFIX + "n2",
+      teamName: "  Smoke   Rival  ",
+      amount: 1,
+      description: "Smoke prize, sloppily named",
+      createdAt: "2000-01-01T11:30:00.000Z",
+      raw: {},
+    },
+  ];
+  check("insertMoneyEvents with a stray-whitespace team name", (await repo.insertMoneyEvents(spaced)) === 1);
+
+  const resolvedSpaced = (await sql`
+    SELECT team_id FROM money_events WHERE event_id = ${PREFIX + "n2"}`) as Record<
+    string,
+    unknown
+  >[];
+  check(
+    "money events resolve a team name whitespace would have hidden",
+    resolvedSpaced[0]?.team_id === PREFIX + "t2",
+    String(resolvedSpaced[0]?.team_id),
+  );
+
   const funds = (await repo.getRivalFunds(210_000_000)).filter((f) =>
     f.teamId.startsWith(PREFIX),
   );
   const rival = funds.find((f) => f.teamId === PREFIX + "t2");
   check(
     "getRivalFunds = budget - spent + received + prizes",
-    rival?.estimatedFunds === 210_000_000 - 25_000_000 + 500_000,
+    rival?.estimatedFunds === 210_000_000 - 25_000_000 + 500_001,
     `estimated=${rival?.estimatedFunds} spent=${rival?.spent} prizes=${rival?.prizes}`,
   );
 

@@ -49,8 +49,26 @@ export function pick(obj: Rec, ...keys: string[]): unknown {
   return undefined;
 }
 
+/**
+ * A string field, with the whitespace Futmondo never trimmed taken off.
+ *
+ * Futmondo stores what its users typed. Five player names in this league end
+ * in a space, which is invisible until a name is interpolated into a sentence
+ * and comes out with a double space in it. The expensive case is not
+ * cosmetic: `/2/locker/news` identifies a team by name and nothing else, and
+ * that name is resolved to an id by string equality, so a space on one side
+ * and not the other drops a money event from the rival-funds estimate — and
+ * the ledger is append-only, so the row is never revisited.
+ *
+ * Normalising here rather than at each of the twenty-odd call sites makes it
+ * impossible to add a name field that forgot to do it. A whitespace-only value
+ * is absent for the same reason an empty one already was: it carries nothing.
+ */
 export function str(v: unknown): string | undefined {
-  if (typeof v === "string") return v.length ? v : undefined;
+  if (typeof v === "string") {
+    const trimmed = v.trim().replace(/\s+/g, " ");
+    return trimmed.length ? trimmed : undefined;
+  }
   if (typeof v === "number") return String(v);
   return undefined;
 }
