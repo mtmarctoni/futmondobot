@@ -9,7 +9,10 @@ import { describe, expect, it } from "vitest";
 
 import type { LowValueOpportunity, RadarReport } from "../engine/radar";
 
-import { formatOpportunities } from "./index";
+import type { AnalysisReport } from "../engine";
+import type { Action } from "../engine/today";
+
+import { buildActionButtons, formatOpportunities } from "./index";
 
 function opportunity(over: Partial<LowValueOpportunity> = {}): LowValueOpportunity {
   return {
@@ -123,5 +126,60 @@ describe("formatOpportunities and message size", () => {
 
     expect(text).toContain("Player Number 0");
     expect(text).not.toContain("Player Number 29");
+  });
+});
+
+/**
+ * Which actions get a one-tap money button.
+ *
+ * Every button here spends money that cannot be recovered, so the mapping from
+ * action kind to callback verb is the load-bearing line: an action kind the
+ * mapping does not know about silently loses its button and the daily message
+ * quietly stops being actionable for it.
+ */
+describe("buildActionButtons", () => {
+  function report(actions: Action[]): AnalysisReport {
+    // buildActionButtons reads nothing but the action list; the rest of the
+    // report is not what is under test here.
+    return {
+      today: {
+        actions,
+        headline: "",
+        deadline: null,
+        hoursToDeadline: null,
+        pointsAvailable: 0,
+      },
+    } as unknown as AnalysisReport;
+  }
+
+  function action(over: Partial<Action> = {}): Action {
+    return {
+      id: "golden-luismi",
+      kind: "golden_clause",
+      weight: 84,
+      urgency: "today",
+      title: "Free value: Luismi Cruz's clause is 20.8M€ against a 20.3M€ value",
+      detail: "Market price, not a premium.",
+      money: -20_780_000,
+      playerId: "luismi",
+      playerName: "Luismi Cruz",
+      ...over,
+    };
+  }
+
+  it("offers a clause button for a golden clause", () => {
+    const [[button]] = buildActionButtons(report([action()]));
+
+    expect(button.text).toBe("Pay clause: Luismi Cruz (20.8M€)");
+    expect(button.callback_data).toContain("clause");
+  });
+
+  it("offers no button for a golden clause that is not payable yet", () => {
+    // Reported as info by today.ts precisely so no button appears.
+    const rows = buildActionButtons(report([action({ kind: "info" })]));
+
+    // Only the refresh row survives.
+    expect(rows).toHaveLength(1);
+    expect(rows[0][0].text).toBe("Refresh");
   });
 });

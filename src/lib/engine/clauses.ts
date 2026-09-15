@@ -8,7 +8,10 @@
  *
  *   Attack.  A rival's player can be taken outright for their clause price,
  *            no negotiation and no bidding war. When that price is below what
- *            the player is worth in points, it is simply free value.
+ *            the player is worth in points, it is simply free value — and when
+ *            it is below what he is worth in euros, it is free value that needs
+ *            no judgement at all. That second case is the golden tier, kept in
+ *            its own list so it is never read as one more speculative bet.
  *   Defence. Who could take your players today is surfaced on the clauses page
  *            and in today's headline, but no block is recommended, automated or
  *            offered as a button. Every block is 200 mondos a week and nothing
@@ -87,9 +90,18 @@ export interface ClauseReport {
   pendingSteals: StealCandidate[];
   exposed: ExposedPlayer[];
   /**
-   * Rival players whose value is rising while their clause stays pinned. A
-   * bet on forward value, not a current discount — see the threshold block.
-   * Sorted by opportunity score descending, affordable first.
+   * Rival players whose clause the market has already overtaken: the clause
+   * costs at most a hair more than the player is worth today. Nothing has to
+   * be believed about the future for these to be worth paying, which is why
+   * they are their own list rather than the top of `trendBets`. Sorted by how
+   * far the clause lags value, affordable first.
+   */
+  golden: ClauseBet[];
+  /**
+   * Rival players whose value is rising while their clause stays pinned, and
+   * whose clause is still above value. A bet on forward value, not a current
+   * discount — see the threshold block. Sorted by opportunity score
+   * descending, affordable first. Never contains a golden clause.
    */
   trendBets: ClauseBet[];
   /**
@@ -136,19 +148,31 @@ export interface ClauseContext {
 const BARGAIN_EFFICIENCY = 0.125;
 
 // ---------------------------------------------------------------------------
-// Rising-value clause bets.
+// Clauses worth paying, in two tiers that must not be confused with each other.
 //
-// Live league data showed clauses are never set below a player's current value:
-// owners price above market as protection, and every "underpriced" candidate
-// from the first version of this feature was actually a clause 20-80% ABOVE
-// value, ranked as if it were free money. That first version recommended paying
-// over the market value of players and put a one-tap money button on it.
+// The first version of this feature called every cheap-looking clause a
+// discount. It was wrong: most "underpriced" candidates were a clause 20-80%
+// ABOVE value, ranked as if they were free money, with a one-tap money button
+// on them. The correction was to reframe all of them as bets on a rising value
+// trend, which was honest but over-corrected — it put the cases where nothing
+// has to be believed about the future in the same list, under the same
+// hedged wording, as the ones where everything does.
 //
-// What the data does support is a different, honest signal: a player whose
-// value is rising while his clause stays pinned. The owner sets the clause, not
-// the market, so it lags value — paying it now buys forward growth. The payoff
-// is future value and requires the trend to hold, so this is a bet and it is
-// stated as one, never as a discount.
+// So there are two tiers, and the difference between them is whether the
+// payoff needs the future:
+//
+//   golden  The market has already overtaken the clause. Owners set a clause
+//           once and rarely revisit it, so a player whose value has run up
+//           can end up clausable at or below what he is worth. Paying it is
+//           an arbitrage that is complete on the day. Live data on 2026-09-14
+//           had four of these in 174 owned players — value/clause of 1.11 for
+//           Unai López, 1.06 Iván Martín, 0.99 Olasagasti, 0.98 Luismi Cruz —
+//           and then a cliff to 0.85. A small nameable set, not a gradient.
+//
+//   trend   The clause is still above value, but value is climbing towards
+//           it. Paying it buys forward growth: the payoff is future value and
+//           requires the trend to hold. This is a bet and is stated as one,
+//           never as a discount.
 // ---------------------------------------------------------------------------
 
 /** Minimum 7-day value rise (euros) to count as a rising trend. */
@@ -158,8 +182,28 @@ const BET_TREND_MIN_DELTA = 250_000;
  * is an overpay no trend justifies.
  */
 const BET_RATIO_MIN = 0.7;
+/**
+ * Tightest value/clause ratio that still counts as buying at market price, so
+ * the clause is free value rather than a bet on the trend.
+ *
+ * 0.95 admits a clause up to ~5.3% over value. That is deliberately a shade
+ * looser than "at or below value": the two clearest cases in the live league,
+ * Olasagasti and Luismi Cruz, sit 0.8% and 2.2% over, and calling those a
+ * forward bet while their value climbs 4-5M a week is a distinction without a
+ * difference. The next candidate below them is at 0.85, so the band does not
+ * leak into ordinary overpriced clauses.
+ */
+const GOLDEN_RATIO_MIN = 0.95;
+
+/**
+ * Which of the two tiers a clause opportunity belongs to. Kept on the row
+ * rather than implied by which array it came from, so a consumer that merges
+ * the lists cannot lose the distinction between free value and a bet.
+ */
+export type ClauseTier = "golden" | "trend";
 
 export interface ClauseBet {
+  tier: ClauseTier;
   player: Evaluated;
   clausePrice: number;
   ownerTeamId: string;
@@ -205,15 +249,16 @@ export function runClauses(ctx: ClauseContext): ClauseReport {
 
   const exposed = findExposed(ctx, now);
 
-  const trendBets = findClauseBets(ctx, ceiling, now);
+  const { golden, trendBets } = findClauseOpportunities(ctx, ceiling, now);
 
   return {
     steals,
     pendingSteals,
     exposed,
+    golden,
     trendBets,
     windowNote: windowNote(exposed),
-    headline: headline(steals, pendingSteals, exposed, ceiling),
+    headline: headline(golden, steals, pendingSteals, exposed, ceiling),
   };
 }
 
@@ -320,22 +365,21 @@ function findSteals(
 }
 
 /**
- * Rival players whose value is rising while their clause stays pinned,
- * regardless of whether they would improve the XI. The owner sets the clause,
- * so it lags a rising market value: paying it now captures the growth the
- * market has already priced in.
+ * Rival players worth paying a clause for on price alone, split into the two
+ * tiers above. Deliberately distinct from findSteals, which asks whether a
+ * player improves the XI: free value is worth taking from a squad filler, and
+ * the golden tier has no points test at all.
  *
- * This is deliberately distinct from findSteals (lineup upgrade) and never
- * framed as a current discount: clause is re-checked against value and the
- * honest gap is said out loud, because the first version of this feature took
- * a clause 30% above value and ranked it as an exploit.
+ * A player lands in exactly one list. Rendering him under both "free value"
+ * and "bet on the trend" would be two different claims about one clause.
  */
-function findClauseBets(
+function findClauseOpportunities(
   ctx: ClauseContext,
   ceiling: number,
   now: Date,
-): ClauseBet[] {
-  const candidates: ClauseBet[] = [];
+): { golden: ClauseBet[]; trendBets: ClauseBet[] } {
+  const golden: ClauseBet[] = [];
+  const trendBets: ClauseBet[] = [];
 
   for (const player of ctx.allPlayers) {
     if (!player.ownerTeamId || player.ownerTeamId === ctx.myTeamId) continue;
@@ -343,11 +387,17 @@ function findClauseBets(
     if (player.clausePrice === null || player.clausePrice <= 0) continue;
     if (player.value <= 0) continue;
 
-    if (player.valueDelta <= BET_TREND_MIN_DELTA) continue;
-
     const clausePrice = player.clausePrice;
     const ratio = player.value / clausePrice;
-    if (ratio < BET_RATIO_MIN) continue;
+    const isGolden = ratio >= GOLDEN_RATIO_MIN;
+
+    // The trend minimum exists to stop noise being sold as a bet. A clause the
+    // market has already overtaken is not a bet, so the trend has no say in
+    // whether it qualifies — only in how it is explained.
+    if (!isGolden) {
+      if (player.valueDelta <= BET_TREND_MIN_DELTA) continue;
+      if (ratio < BET_RATIO_MIN) continue;
+    }
 
     const discount = player.value - clausePrice;
     const affordable = clausePrice <= Math.min(ceiling, ctx.funds);
@@ -355,8 +405,7 @@ function findClauseBets(
       ? null
       : (player.clauseDate as string);
     const clauseDateKnown = player.clauseDate !== null;
-
-    candidates.push({
+    const shared = {
       player,
       clausePrice,
       ownerTeamId: player.ownerTeamId,
@@ -367,23 +416,86 @@ function findClauseBets(
       affordable,
       availableFrom,
       clauseDateKnown,
-      reason: clauseBetReason({
-        player,
-        clausePrice,
-        ratio,
-        discount,
-        affordable,
-        availableFrom,
-        clauseDateKnown,
-        funds: ctx.funds,
-      }),
-    });
+    };
+
+    if (isGolden) {
+      golden.push({
+        ...shared,
+        tier: "golden",
+        reason: goldenReason({ ...shared, funds: ctx.funds }),
+      });
+    } else {
+      trendBets.push({
+        ...shared,
+        tier: "trend",
+        reason: clauseBetReason({ ...shared, funds: ctx.funds }),
+      });
+    }
   }
 
-  return candidates.sort((a, b) => {
-    if (a.affordable !== b.affordable) return a.affordable ? -1 : 1;
-    return b.opportunity - a.opportunity;
-  });
+  return {
+    // How far the clause lags value, not the trend: the gap is the whole
+    // point of this tier, and ranking by trend would put a player who is
+    // barely level above one already under value.
+    golden: golden.sort((a, b) => {
+      if (a.affordable !== b.affordable) return a.affordable ? -1 : 1;
+      if (b.ratio !== a.ratio) return b.ratio - a.ratio;
+      return b.discount - a.discount;
+    }),
+    trendBets: trendBets.sort((a, b) => {
+      if (a.affordable !== b.affordable) return a.affordable ? -1 : 1;
+      return b.opportunity - a.opportunity;
+    }),
+  };
+}
+
+/**
+ * Why a golden clause is worth paying, said without the hedging a forward bet
+ * needs — and without overclaiming when the clause is a shade over value
+ * rather than under it. The distinction is a sentence apart in the output and
+ * millions apart in the decision.
+ */
+function goldenReason(args: {
+  player: Evaluated;
+  clausePrice: number;
+  discount: number;
+  affordable: boolean;
+  availableFrom: string | null;
+  clauseDateKnown: boolean;
+  funds: number;
+}): string {
+  const {
+    player,
+    clausePrice,
+    discount,
+    affordable,
+    availableFrom,
+    clauseDateKnown,
+    funds,
+  } = args;
+
+  if (!affordable) {
+    return `Clause is ${fmtMoney(clausePrice)}, beyond the ${fmtMoney(funds)} available.`;
+  }
+
+  const standing =
+    discount >= 0
+      ? `Clause ${fmtMoney(clausePrice)} is ${fmtMoney(discount)} under his own market value of ${fmtMoney(player.value)} — you pay less than he is worth today.`
+      : `Clause ${fmtMoney(clausePrice)} sits ${fmtMoney(-discount)} over a ${fmtMoney(player.value)} value — market price, not a premium.`;
+
+  // Supporting evidence, not the payoff: the gap above is already banked.
+  const trend =
+    player.valueDelta > 0
+      ? `Value up ${fmtMoney(player.valueDelta)} in the last week while the clause stayed where the owner left it, so the gap is still opening.`
+      : "";
+
+  const when = availableFrom
+    ? `Not payable until ${formatWhen(availableFrom)}.`
+    : clauseDateKnown
+      ? ""
+      : "Clause window has not been read yet — check the date in Futmondo before paying.";
+
+  return [standing, trend, when].filter(Boolean).join(" ");
 }
 
 function clauseBetOpportunity(ratio: number, valueDelta: number): number {
@@ -573,11 +685,29 @@ function exposureReason(args: {
 }
 
 function headline(
+  golden: ClauseBet[],
   steals: StealCandidate[],
   pendingSteals: StealCandidate[],
   exposed: ExposedPlayer[],
   ceiling: number,
 ): string {
+  // A clause the market has already overtaken leads, because it is the one
+  // clause decision that needs nothing believed about the future and the one
+  // that disappears the moment the owner notices. Pending and unaffordable
+  // ones are left to the full list: neither is something to do today.
+  const topGolden = golden.find(
+    (g) => g.affordable && g.availableFrom === null,
+  );
+  if (topGolden) {
+    const gap =
+      topGolden.discount >= 0
+        ? `${fmtMoney(topGolden.discount)} under his ${fmtMoney(topGolden.player.value)} value`
+        : `level with his ${fmtMoney(topGolden.player.value)} value`;
+    return `${topGolden.player.name} is clausable at ${fmtMoney(
+      topGolden.clausePrice,
+    )}, ${gap}. Free value while the owner leaves the clause where it is.`;
+  }
+
   const topSteal = steals.find((s) => s.affordable);
   // A player nobody can take today is not exposed today. The unaffordable and
   // not-yet-open cases are surfaced in the full list; the headline names only
@@ -615,4 +745,4 @@ function headline(
   return "No clause opportunities, and nothing of yours looks exposed.";
 }
 
-export { BARGAIN_EFFICIENCY };
+export { BARGAIN_EFFICIENCY, GOLDEN_RATIO_MIN };

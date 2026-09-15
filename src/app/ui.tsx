@@ -95,23 +95,49 @@ export function Delta({ value }: { value: number }) {
 
 // ----------------------------------------------------------- primitives ----
 
+/**
+ * Cards are uniformly grey so that nothing shouts by default. `accent` is the
+ * exception, for a section whose whole point is that it is not like the ones
+ * around it. Class names are looked up rather than interpolated, because
+ * Tailwind only keeps the ones it can see written out.
+ */
+const CARD_ACCENT = {
+  none: {
+    frame: "border-zinc-800 bg-zinc-900/40",
+    divider: "border-zinc-800",
+    title: "text-zinc-100",
+  },
+  amber: {
+    frame: "border-amber-700/60 bg-amber-950/20",
+    divider: "border-amber-800/50",
+    title: "text-amber-200",
+  },
+} as const;
+
 export function Card({
   title,
   subtitle,
   children,
   right,
+  accent = "none",
 }: {
   title?: string;
   subtitle?: string;
   right?: React.ReactNode;
   children: React.ReactNode;
+  accent?: keyof typeof CARD_ACCENT;
 }) {
+  const tone = CARD_ACCENT[accent];
   return (
-    <section className="rounded-xl border border-zinc-800 bg-zinc-900/40">
+    <section className={`rounded-xl border ${tone.frame}`}>
       {(title || right) && (
-        <header className="flex items-start justify-between gap-4 border-b border-zinc-800 px-4 py-3">
+        <header
+          className={`flex items-start justify-between gap-4 border-b px-4 py-3 ${tone.divider}`}
+        >
           <div>
-            {title && <h2 className="font-medium text-zinc-100">{title}</h2>}
+            {title && (
+              <h2 className={`font-medium ${tone.title}`}>{title}</h2>
+            )}
             {subtitle && (
               <p className="mt-0.5 text-sm text-zinc-400">{subtitle}</p>
             )}

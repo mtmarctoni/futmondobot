@@ -91,6 +91,7 @@ const NO_CLAUSES: ClauseReport = {
   steals: [],
   pendingSteals: [],
   exposed: [],
+  golden: [],
   trendBets: [],
   windowNote: null,
   headline: "",
@@ -403,6 +404,7 @@ describe("prize-money wording in steal actions", () => {
 describe("clause_bet actions", () => {
   function bet(over: Partial<ClauseBet> = {}): ClauseBet {
     return {
+      tier: "trend",
       player: evaluated({ playerId: "target", name: "Target" }),
       clausePrice: 10_000_000,
       ownerTeamId: "rival",
@@ -471,5 +473,121 @@ describe("clause_bet actions", () => {
     ]);
     expect(action).toBeDefined();
     expect(action.detail).toMatch(/Not payable until 2026-09-07 18:05Z/);
+  });
+});
+
+/**
+ * A clause the market has already overtaken is the one money decision in the
+ * game that needs nothing believed about the future, and it lasts only until
+ * the owner notices. It used to be scored by the same formula as a clause 30%
+ * above value and rendered in the same grey list, so it arrived on the phone
+ * looking exactly like the speculative bets around it.
+ */
+describe("golden_clause actions", () => {
+  function golden(over: Partial<ClauseBet> = {}): ClauseBet {
+    return {
+      tier: "golden",
+      player: evaluated({
+        playerId: "luismi",
+        name: "Luismi Cruz",
+        value: 20_330_000,
+      }),
+      clausePrice: 20_780_000,
+      ownerTeamId: "rival",
+      ownerName: "Rival FC",
+      ratio: 0.978,
+      discount: -450_000,
+      opportunity: 6.8,
+      affordable: true,
+      availableFrom: null,
+      clauseDateKnown: true,
+      reason:
+        "Clause 20.8M€ sits 450k€ over a 20.3M€ value — market price, not a premium. Value up 5.00M€ in the last week while the clause stayed where the owner left it, so the gap is still opening.",
+      ...over,
+    };
+  }
+
+  function goldenActions(rows: ClauseBet[]): Action[] {
+    const { actions } = buildToday(
+      input({ clauses: { ...NO_CLAUSES, golden: rows } }),
+    );
+    return actions.filter(
+      (a) => a.kind === "golden_clause" || a.id.startsWith("golden-"),
+    );
+  }
+
+  it("surfaces an affordable, payable golden clause above the buy band", () => {
+    const [action] = goldenActions([golden()]);
+    expect(action).toBeDefined();
+    expect(action.kind).toBe("golden_clause");
+    expect(action.title).toContain("Luismi Cruz");
+    expect(action.title).toContain("20.8M€");
+    expect(action.money).toBe(-20_780_000);
+    expect(action.urgency).toBe("today");
+    // Market buys occupy 60-75 and steals 80-90; free value ranks above both,
+    // and below anything that costs points this week.
+    expect(action.weight).toBeGreaterThan(75);
+    expect(action.weight).toBeLessThan(89);
+  });
+
+  it("carries the engine's wording rather than restating the claim", () => {
+    const [action] = goldenActions([golden()]);
+    expect(action.detail).toContain("market price, not a premium");
+    expect(action.detail).toContain("Rival FC");
+  });
+
+  it("ranks a golden clause above a rising-value bet on the same day", () => {
+    const { actions } = buildToday(
+      input({
+        clauses: {
+          ...NO_CLAUSES,
+          golden: [golden()],
+          trendBets: [
+            {
+              tier: "trend",
+              player: evaluated({ playerId: "riser", name: "Riser" }),
+              clausePrice: 10_000_000,
+              ownerTeamId: "rival",
+              ownerName: "Rival FC",
+              ratio: 0.9,
+              discount: -1_000_000,
+              opportunity: 9,
+              affordable: true,
+              availableFrom: null,
+              clauseDateKnown: true,
+              reason: "Bet pays only if value keeps rising.",
+            },
+          ],
+        },
+      }),
+    );
+    const ids = actions.map((a) => a.playerId);
+    expect(ids).toContain("luismi");
+    expect(ids).toContain("riser");
+    expect(ids.indexOf("luismi")).toBeLessThan(ids.indexOf("riser"));
+  });
+
+  it("excludes a golden clause beyond the funds available", () => {
+    expect(goldenActions([golden({ affordable: false })])).toHaveLength(0);
+  });
+
+  it("reports a golden clause that is not payable yet without offering to pay it", () => {
+    const [action] = goldenActions([
+      golden({ availableFrom: "2026-09-07T18:05:10.923Z" }),
+    ]);
+    expect(action).toBeDefined();
+    // A money button here would offer a payment Futmondo refuses today.
+    expect(action.kind).toBe("info");
+    expect(action.title).toMatch(/from 2026-09-07 18:05Z/);
+    expect(action.weight).toBeLessThan(75);
+  });
+
+  it("caps at three, so free value never crowds out the lineup", () => {
+    const many = [1, 2, 3, 4].map((i) =>
+      golden({ player: evaluated({ playerId: `g${i}`, name: `Golden ${i}` }) }),
+    );
+    const actions = goldenActions(many);
+    expect(actions).toHaveLength(3);
+    expect(actions.map((a) => a.playerId)).toEqual(["g1", "g2", "g3"]);
   });
 });

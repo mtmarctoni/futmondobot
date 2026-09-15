@@ -15,6 +15,8 @@ import { fmtMoney, paysForPoints, type LeagueRules } from "./types";
 export type ActionKind =
   | "set_lineup"
   | "steal_clause"
+  /** A clause at or under the player's own market value. Free value today. */
+  | "golden_clause"
   | "clause_bet"
   | "buy"
   | "sell"
@@ -84,6 +86,7 @@ export function buildToday(input: TodayInput): TodayReport {
   // that will still be there tomorrow.
   actions.push(...listingActions(input.market.listings));
   actions.push(...clauseWindowActions(input.clauses));
+  actions.push(...goldenClauseActions(input.clauses.golden));
   actions.push(...stealActions(input.clauses.steals, input.rules));
   actions.push(...clauseBetActions(input.clauses.trendBets));
   // Departures already have their own action, and a duplicate sell for the
@@ -234,6 +237,62 @@ function departureActions(departed: DepartedPlayer[]): Action[] {
       playerName: player.name,
     };
   });
+}
+
+/**
+ * Clauses the market has already overtaken.
+ *
+ * Ranked at 84: above market buys (60-75), above a typical steal (80-90) and
+ * far above a forward bet (45-57), but below anything that costs points this
+ * week. The ordering is not about size — most of these are small — but about
+ * certainty and shelf life. A steal is a judgement about expected points; this
+ * is arithmetic on two numbers Futmondo publishes, and it survives only until
+ * the owner reprices the clause.
+ *
+ * A golden clause that is not payable yet is reported as information with no
+ * button: a payment offered before `clause.date` is a payment Futmondo
+ * refuses. Capped at three either way.
+ */
+function goldenClauseActions(golden: ClauseBet[]): Action[] {
+  return golden
+    .filter((g) => g.affordable)
+    .slice(0, 3)
+    .map((g, index) => {
+      const owner = g.ownerName ? ` Currently at ${g.ownerName}.` : "";
+
+      if (g.availableFrom !== null) {
+        return {
+          id: `golden-${g.player.playerId}`,
+          kind: "info" as const,
+          weight: 58 - index,
+          urgency: "whenever" as const,
+          title: `${g.player.name} is clausable at ${fmtMoney(g.clausePrice)} from ${formatWhen(g.availableFrom)}`,
+          detail: `${g.reason}${owner}`,
+          pointsAtStake: 0,
+          money: g.clausePrice,
+          playerId: g.player.playerId,
+          playerName: g.player.name,
+        };
+      }
+
+      return {
+        id: `golden-${g.player.playerId}`,
+        kind: "golden_clause" as const,
+        weight: 84 - index,
+        urgency: "today" as const,
+        title: `Free value: ${g.player.name}'s clause is ${fmtMoney(g.clausePrice)} against a ${fmtMoney(g.player.value)} value`,
+        detail: `${g.reason}${owner}`,
+        money: -g.clausePrice,
+        playerId: g.player.playerId,
+        playerName: g.player.name,
+      };
+    });
+}
+
+/** Shared with the clause engine's own wording, so one instant reads one way. */
+function formatWhen(iso: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(iso)) return iso;
+  return `${iso.replace("T", " ").slice(0, 16)}Z`;
 }
 
 function stealActions(steals: StealCandidate[], rules: LeagueRules): Action[] {

@@ -301,6 +301,28 @@ from `/1/player/summary`, one call per player, which is why it is collected in
 batches on a slower schedule; the same call supplies `suggestedClause`,
 Futmondo's own idea of a fair price, which is roughly half what owners set.
 
+**Free value, kept separate from the bets.** Owners set a clause once and
+rarely revisit it, so a player whose market value has run up can end up
+clausable for about what he is worth, or less. `value / clause >= 0.95` makes
+him **golden**: the whole payoff is on the table today, nothing has to be
+believed about a trend, and there is no points test — free value is worth
+taking from a squad filler. On 2026-09-14, four of 174 owned players qualified
+(Unai López 1.11, Iván Martín 1.06, Olasagasti 0.99, Luismi Cruz 0.98) and the
+next candidate was at 0.85, so the band is a small nameable set rather than a
+gradient. Golden clauses get their own list, sorted by how far the clause lags
+value, their own highlighted card above everything else on `/clauses`, and the
+clause headline. They never appear in the rising-value list as well: rendering
+one clause under both "free value" and "a bet on the trend" would be two
+different claims about the same number.
+
+**Rising-value bets** are the tier below: the clause is still above value, but
+value is climbing towards it while the owner leaves it pinned. The payoff is
+future value and needs the trend to hold, so it is stated as a bet and never as
+a discount. This distinction exists because the first version of the feature
+ranked clauses 20-80% *above* value as if they were free money, and the
+correction that followed over-swung and hedged the genuinely free ones the same
+way.
+
 **Defence.** Blocking a clause now costs 200 mondos a player a week, so the app
 does not recommend or automate it: defence is reporting who could be taken. It
 lists our players who are attractively priced, affordable to at least one rival,
@@ -350,10 +372,15 @@ threat, so this is what decides which of your players are exposed.
 3. A player who has left the competition, because the loss compounds daily.
 4. A bid standing against one of our own listings and closing soon, because it
    expires rather than waiting for the next report.
-5. The clause-window note, because a clause that opens in two days is worth
+5. A golden clause — one at or under the player's own market value. Above the
+   buys and above a steal: a steal is a judgement about expected points, this
+   is arithmetic on two published numbers, and it survives only until the owner
+   reprices the clause. One whose window has not opened yet is reported without
+   a payment button, because Futmondo would refuse the payment.
+6. The clause-window note, because a clause that opens in two days is worth
    planning for.
-6. A clause steal, weighted by the upgrade.
-7. Up to three buys, then a sell.
+7. A clause steal, weighted by the upgrade.
+8. Up to three buys, then a sell, then a rising-value clause bet.
 
 Anything that needs no action is deliberately not listed. Each entry carries the
 points at stake and the money involved, so the cost of ignoring it is visible.

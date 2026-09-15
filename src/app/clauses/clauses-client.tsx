@@ -22,6 +22,11 @@ import {
  * what can be taken from you. Blocking now costs 200 mondos a player a week,
  * so the defence half is information, not advice: who could take your players
  * is listed, and no block is recommended, automated or offered as a button.
+ *
+ * The attack half leads with the golden tier — clauses the market has already
+ * overtaken — in the one accented card on the page. These used to render in
+ * the same grey as the speculative bets around them, which is exactly how a
+ * clause worth paying today gets scrolled past.
  */
 export function ClausesClient({ initial }: { initial: AnalysisReport }) {
   const { data, loading, error, refresh } = useAnalysis(initial);
@@ -61,6 +66,63 @@ export function ClausesClient({ initial }: { initial: AnalysisReport }) {
           <code className="text-amber-100">/api/sync?job=clauses</code> a few
           times.
         </p>
+      )}
+
+      {clauses.golden.length > 0 && (
+        <Card
+          accent="amber"
+          title="At or under value"
+          subtitle="Clauses the market has already overtaken: paying buys the player for about what he is worth, or less. Nothing has to be believed about the future, and it lasts only until the owner reprices the clause. Best gap first, affordable first."
+        >
+          <ul>
+            {clauses.golden.map((bet) => (
+              <li
+                key={bet.player.playerId}
+                className="flex items-center gap-3 border-b border-amber-900/30 py-2 last:border-0"
+              >
+                <Role role={bet.player.role} />
+                <div className="min-w-0 flex-1">
+                  <p className="flex flex-wrap items-center gap-x-2 gap-y-1 font-medium text-zinc-100">
+                    {bet.player.name}
+                    {bet.ownerName && (
+                      <span className="text-xs font-normal text-zinc-500">
+                        at {bet.ownerName}
+                      </span>
+                    )}
+                    <span className="shrink-0 rounded bg-amber-400/20 px-1.5 py-0.5 text-xs font-medium text-amber-200">
+                      {bet.discount >= 0 ? "under value" : "at value"}
+                    </span>
+                    {!bet.affordable && (
+                      <span className="shrink-0 rounded bg-zinc-700/50 px-1.5 py-0.5 text-xs text-zinc-400">
+                        out of reach
+                      </span>
+                    )}
+                    {bet.availableFrom && (
+                      <span className="shrink-0 rounded bg-sky-500/15 px-1.5 py-0.5 text-xs text-sky-200">
+                        opens {bet.availableFrom.replace("T", " ").slice(0, 16)}Z
+                      </span>
+                    )}
+                  </p>
+                  <p className="text-xs leading-relaxed text-zinc-400">
+                    {bet.reason}
+                  </p>
+                </div>
+                <div className="shrink-0 text-right text-sm">
+                  <div className="font-medium text-amber-100">
+                    <Money value={bet.clausePrice} />
+                  </div>
+                  <div className="text-xs text-zinc-400">
+                    value <Money value={bet.player.value} /> ·{" "}
+                    {bet.ratio.toFixed(2)}x
+                  </div>
+                  <div className="text-xs text-zinc-500">
+                    7d <Delta value={bet.player.valueDelta} />
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </Card>
       )}
 
       <Card
@@ -109,7 +171,7 @@ export function ClausesClient({ initial }: { initial: AnalysisReport }) {
       {clauses.trendBets.length > 0 && (
         <Card
           title="Rising-value clauses"
-          subtitle="Rivals' players whose value is rising while the clause stays pinned by the owner. Paying it bets on forward value — the payoff is future, not today's discount. Ordered by opportunity, affordable first."
+          subtitle="Rivals' players whose clause is still above value, but whose value is rising towards it while the owner leaves the clause pinned. Paying it bets on forward value — the payoff is future, not today's discount. Ordered by opportunity, affordable first."
         >
           <ul>
             {clauses.trendBets.map((bet) => (
