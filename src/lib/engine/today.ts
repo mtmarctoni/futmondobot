@@ -86,8 +86,19 @@ export function buildToday(input: TodayInput): TodayReport {
   // that will still be there tomorrow.
   actions.push(...listingActions(input.market.listings));
   actions.push(...clauseWindowActions(input.clauses));
-  actions.push(...goldenClauseActions(input.clauses.golden));
-  actions.push(...stealActions(input.clauses.steals, input.rules));
+  // A golden clause and a steal can name the same player, and did live: two
+  // entries at adjacent weights, each with its own one-tap money button for
+  // the same irreversible payment. Golden wins and absorbs the steal's points
+  // upgrade, the way a departure absorbs its duplicate sell below.
+  const golden = goldenClauseActions(input.clauses.golden, input.clauses.steals);
+  actions.push(...golden);
+  actions.push(
+    ...stealActions(
+      input.clauses.steals,
+      input.rules,
+      new Set(golden.map((a) => a.playerId)),
+    ),
+  );
   actions.push(...clauseBetActions(input.clauses.trendBets));
   // Departures already have their own action, and a duplicate sell for the
   // same player reads as two separate problems.
@@ -253,12 +264,25 @@ function departureActions(departed: DepartedPlayer[]): Action[] {
  * button: a payment offered before `clause.date` is a payment Futmondo
  * refuses. Capped at three either way.
  */
-function goldenClauseActions(golden: ClauseBet[]): Action[] {
+function goldenClauseActions(
+  golden: ClauseBet[],
+  steals: StealCandidate[],
+): Action[] {
   return golden
     .filter((g) => g.affordable)
     .slice(0, 3)
     .map((g, index) => {
       const owner = g.ownerName ? ` Currently at ${g.ownerName}.` : "";
+      // Free value that also improves the XI is worth more than free value
+      // that does not, and this is the only place left to say so.
+      const steal = steals.find(
+        (s) => s.player.playerId === g.player.playerId && s.upgrade > 0,
+      );
+      const upgrade = steal
+        ? ` He is also ${steal.upgrade.toFixed(1)} pts/round better than ${
+            steal.replaces ? steal.replaces.name : "anyone you have in that role"
+          }.`
+        : "";
 
       if (g.availableFrom !== null) {
         return {
@@ -267,7 +291,7 @@ function goldenClauseActions(golden: ClauseBet[]): Action[] {
           weight: 58 - index,
           urgency: "whenever" as const,
           title: `${g.player.name} is clausable at ${fmtMoney(g.clausePrice)} from ${formatWhen(g.availableFrom)}`,
-          detail: `${g.reason}${owner}`,
+          detail: `${g.reason}${owner}${upgrade}`,
           pointsAtStake: 0,
           money: g.clausePrice,
           playerId: g.player.playerId,
@@ -281,7 +305,8 @@ function goldenClauseActions(golden: ClauseBet[]): Action[] {
         weight: 84 - index,
         urgency: "today" as const,
         title: `Free value: ${g.player.name}'s clause is ${fmtMoney(g.clausePrice)} against a ${fmtMoney(g.player.value)} value`,
-        detail: `${g.reason}${owner}`,
+        detail: `${g.reason}${owner}${upgrade}`,
+        pointsAtStake: steal?.upgrade,
         money: -g.clausePrice,
         playerId: g.player.playerId,
         playerName: g.player.name,
@@ -295,9 +320,13 @@ function formatWhen(iso: string): string {
   return `${iso.replace("T", " ").slice(0, 16)}Z`;
 }
 
-function stealActions(steals: StealCandidate[], rules: LeagueRules): Action[] {
+function stealActions(
+  steals: StealCandidate[],
+  rules: LeagueRules,
+  alreadyGolden: ReadonlySet<string | undefined>,
+): Action[] {
   return steals
-    .filter((s) => s.affordable)
+    .filter((s) => s.affordable && !alreadyGolden.has(s.player.playerId))
     .slice(0, 3)
     .map((steal, index) => {
       // Only stated where the league genuinely pays for points. This league
