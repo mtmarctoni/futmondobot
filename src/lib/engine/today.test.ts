@@ -582,6 +582,49 @@ describe("golden_clause actions", () => {
     expect(action.weight).toBeLessThan(75);
   });
 
+  it("does not also list a golden clause as a steal", () => {
+    // Seen live: Olasagasti arrived as both, 84 and 83, which is two money
+    // buttons on one phone for one irreversible payment.
+    const player = evaluated({
+      playerId: "olasagasti",
+      name: "Olasagasti",
+      value: 17_950_000,
+    });
+    const { actions } = buildToday(
+      input({
+        clauses: {
+          ...NO_CLAUSES,
+          golden: [golden({ player, clausePrice: 18_090_000 })],
+          steals: [
+            {
+              player,
+              clausePrice: 18_090_000,
+              ownerTeamId: "rival",
+              ownerName: "Rival FC",
+              upgrade: 2.4,
+              replaces: evaluated({ playerId: "weak", name: "Weak Link" }),
+              efficiency: 0.3,
+              discount: -140_000,
+              overSuggested: null,
+              affordable: true,
+              availableFrom: null,
+              clauseDateKnown: true,
+              reason: "18.1M€ for 2.4 pts/round better than Weak Link.",
+            },
+          ],
+        },
+      }),
+    );
+
+    const his = actions.filter((a) => a.playerId === "olasagasti");
+    expect(his).toHaveLength(1);
+    expect(his[0].kind).toBe("golden_clause");
+    // The upgrade is the steal's whole contribution, so it moves across
+    // rather than being dropped with the duplicate.
+    expect(his[0].detail).toContain("2.4 pts/round better than Weak Link");
+    expect(his[0].pointsAtStake).toBe(2.4);
+  });
+
   it("caps at three, so free value never crowds out the lineup", () => {
     const many = [1, 2, 3, 4].map((i) =>
       golden({ player: evaluated({ playerId: `g${i}`, name: `Golden ${i}` }) }),
