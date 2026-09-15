@@ -359,6 +359,14 @@ up over many syncs and some old rows may never appear.
 **Treat the ordering as reliable and the amounts as approximate.** Teams with
 fewer than five known transfers are flagged in the UI.
 
+A prize event names a team and gives no id, so the name is matched against
+`teams` and `team_name_history` to find one — through `norm_name()`, which
+lowercases and collapses whitespace. Futmondo trims nothing its users type, so
+an exact match would leave `team_id` null on a name that differed by a space;
+the funds query only sums events where it is not null, and the ledger is
+append-only, so that prize would have gone missing for the rest of the season
+with nothing reporting it.
+
 It matters because a rival who cannot afford your player's clause is not a
 threat, so this is what decides which of your players are exposed.
 

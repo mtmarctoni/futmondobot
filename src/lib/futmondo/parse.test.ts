@@ -20,6 +20,7 @@ import {
   parseTransfers,
   parseUserTeamInformation,
   role,
+  str,
 } from "./parse";
 
 describe("asArray", () => {
@@ -43,6 +44,46 @@ describe("asArray", () => {
 
   it("drops non-object entries", () => {
     expect(asArray([{ a: 1 }, null, "x", 3], "players")).toEqual([{ a: 1 }]);
+  });
+});
+
+/**
+ * Futmondo does not trim what its users type, and a stray space is invisible
+ * in every place it does damage. Five player names in this league carry a
+ * trailing one ("Ivan Martin ", "German ", "David Soria "...), which reads as
+ * a double space wherever a name is interpolated into a sentence. Worse, a
+ * team name is the only key `/2/locker/news` gives for a money event, and that
+ * lookup is an equality test — a space on one side and not the other silently
+ * drops the row from the rival-funds estimate, permanently, because the ledger
+ * is append-only.
+ */
+describe("str", () => {
+  it("reads a plain string unchanged", () => {
+    expect(str("Luismi Cruz")).toBe("Luismi Cruz");
+  });
+
+  it("trims the stray whitespace Futmondo stores around names", () => {
+    expect(str("Ivan Martin ")).toBe("Ivan Martin");
+    expect(str(" Tuduritraining")).toBe("Tuduritraining");
+    expect(str("\tGerman\n")).toBe("German");
+  });
+
+  it("collapses a run of whitespace inside a name", () => {
+    expect(str("Raul  de  Tomas")).toBe("Raul de Tomas");
+  });
+
+  it("treats a whitespace-only value as absent, like an empty string", () => {
+    // The existing rule is that "" is absent. A value that is only spaces
+    // carries no more information than one that is empty, and letting it
+    // through would put a blank name where a missing one is handled.
+    expect(str("   ")).toBeUndefined();
+    expect(str("")).toBeUndefined();
+  });
+
+  it("still refuses a value that is neither string nor number", () => {
+    expect(str(null)).toBeUndefined();
+    expect(str({})).toBeUndefined();
+    expect(str(42)).toBe("42");
   });
 });
 
