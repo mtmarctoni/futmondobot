@@ -31,6 +31,7 @@ function player(
     unavailableReason: null,
     availability: "fit",
     valueDelta: 0,
+    valueTrendDays: 7,
     sampleRounds: 5,
     expectedPoints,
     pointsPerMillion: expectedPoints / 10,

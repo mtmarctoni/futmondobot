@@ -110,6 +110,15 @@ export interface Evaluated {
 
   /** Value change over the trend window, in euros. */
   valueDelta: number;
+  /**
+   * Calendar days `valueDelta` was measured across, first reading to last.
+   *
+   * Carried alongside the delta because a delta is not a rate. Snapshot
+   * coverage is uneven, so "up 1.8M" can mean a week or a single day, and
+   * every forward projection built on it needs to know which. Zero means one
+   * reading only: no rate exists, and nothing may pretend otherwise.
+   */
+  valueTrendDays: number;
   /** Rounds of per-round evidence behind pointsPerStart. */
   sampleRounds: number;
 

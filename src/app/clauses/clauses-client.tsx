@@ -28,6 +28,18 @@ import {
  * the same grey as the speculative bets around them, which is exactly how a
  * clause worth paying today gets scrolled past.
  */
+/**
+ * The countdown, in the same words the engine uses. A clause opportunity is
+ * really a date, and a reader acts on "3 days" in a way they never act on
+ * "0.83x".
+ */
+function countdown(days: number | null): string {
+  if (days === null) return "not closing";
+  if (days === 0) return "now";
+  if (days < 1.5) return "under a day";
+  return `~${Math.round(days)} days`;
+}
+
 export function ClausesClient({ initial }: { initial: AnalysisReport }) {
   const { data, loading, error, refresh } = useAnalysis(initial);
 
@@ -39,8 +51,15 @@ export function ClausesClient({ initial }: { initial: AnalysisReport }) {
   const { clauses } = data;
   const affordable = clauses.steals.filter((s) => s.affordable);
   const outOfReach = clauses.steals.filter((s) => !s.affordable);
-  const atRisk = clauses.exposed.filter((e) => e.threats.length > 0);
-  const safe = clauses.exposed.filter((e) => e.threats.length === 0);
+  // The engine decides what counts as takeable, because the rule is not "some
+  // rival is estimated to afford it" — see ExposedPlayer.atRisk. The card then
+  // shows only the ones on the countdown: a squad of fifteen plus reserves is
+  // mostly players a rival could technically pay for and would never want, and
+  // listing all of them is how the three that matter get scrolled past.
+  const atRisk = clauses.exposed.filter((e) => e.atRisk && e.tier !== "priced");
+  const rest = clauses.exposed.filter((e) => !atRisk.includes(e));
+  const shut = rest.filter((e) => e.availableFrom !== null).length;
+  const unwanted = rest.length - shut;
 
   return (
     <div className="space-y-5">
@@ -170,8 +189,8 @@ export function ClausesClient({ initial }: { initial: AnalysisReport }) {
 
       {clauses.trendBets.length > 0 && (
         <Card
-          title="Rising-value clauses"
-          subtitle="Rivals' players whose clause is still above value, but whose value is rising towards it while the owner leaves the clause pinned. Paying it bets on forward value — the payoff is future, not today's discount. Ordered by opportunity, affordable first."
+          title="Next to cross"
+          subtitle="Rivals' players whose value is climbing towards a clause the owner left pinned, and is on course to reach it within four weeks. These are the ones that become free value next — ordered by how soon they cross, weighted by whether the player is worth having when they do. Paying now buys the crossing early, and the bet pays only if value keeps rising."
         >
           <ul>
             {clauses.trendBets.map((bet) => (
@@ -206,12 +225,11 @@ export function ClausesClient({ initial }: { initial: AnalysisReport }) {
                   <div className="text-zinc-100">
                     <Money value={bet.clausePrice} />
                   </div>
-                  <div className="text-xs text-zinc-500">
-                    {bet.ratio.toFixed(2)}x vs value{" "}
-                    <Money value={bet.player.value} />
+                  <div className="text-xs font-medium text-amber-200/80">
+                    crosses {countdown(bet.daysToValue)}
                   </div>
                   <div className="text-xs text-zinc-500">
-                    opp {bet.opportunity.toFixed(1)} · trend{" "}
+                    {bet.ratio.toFixed(2)}x · opp {bet.opportunity.toFixed(1)} ·{" "}
                     <Delta value={bet.player.valueDelta} />
                   </div>
                 </div>
@@ -257,14 +275,15 @@ export function ClausesClient({ initial }: { initial: AnalysisReport }) {
       )}
 
       <Card
+        accent={atRisk.some((e) => e.tier === "golden") ? "amber" : "none"}
         title="Yours at risk"
-        subtitle="Who a rival could take right now. Blocking costs 200 mondos a player a week, so the budget is held instead — this list informs, it does not advise."
+        subtitle="Your own squad run through the same arithmetic, pointed the other way: this is the order a rival raids you in, soonest to cross first. Blocking costs 200 mondos a player a week, so the budget is held instead — this list informs, it does not advise."
       >
         {atRisk.length === 0 ? (
           <Empty>
             {clauses.exposed.length === 0
               ? "No clause prices known for your own squad yet."
-              : "No rival is estimated to afford any of your players."}
+              : "Every clause of yours is still comfortably above what the player is worth."}
           </Empty>
         ) : (
           <ul>
@@ -275,11 +294,15 @@ export function ClausesClient({ initial }: { initial: AnalysisReport }) {
               >
                 <Role role={risk.player.role} />
                 <div className="min-w-0 flex-1">
-                  <p className="flex items-center gap-2 truncate font-medium text-zinc-100">
+                  <p className="flex flex-wrap items-center gap-x-2 gap-y-1 font-medium text-zinc-100">
                     {risk.player.name}
                     {risk.alreadyLocked ? (
                       <span className="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.5 text-xs text-emerald-300">
                         blocked
+                      </span>
+                    ) : risk.tier === "golden" ? (
+                      <span className="shrink-0 rounded bg-amber-400/20 px-1.5 py-0.5 text-xs font-medium text-amber-200">
+                        under value now
                       </span>
                     ) : (
                       <span className="shrink-0 rounded bg-rose-500/15 px-1.5 py-0.5 text-xs text-rose-300">
@@ -302,8 +325,20 @@ export function ClausesClient({ initial }: { initial: AnalysisReport }) {
                   <div className="text-zinc-100">
                     <Money value={risk.clausePrice} />
                   </div>
+                  <div
+                    className={`text-xs font-medium ${
+                      risk.tier === "golden"
+                        ? "text-amber-200"
+                        : risk.tier === "trend"
+                          ? "text-amber-200/70"
+                          : "text-zinc-500"
+                    }`}
+                  >
+                    crosses {countdown(risk.daysToValue)}
+                  </div>
                   <div className="text-xs text-zinc-500">
-                    {risk.efficiency.toFixed(2)} pts/M
+                    {risk.ratio.toFixed(2)}x · value{" "}
+                    <Money value={risk.player.value} />
                   </div>
                 </div>
               </li>
@@ -312,12 +347,24 @@ export function ClausesClient({ initial }: { initial: AnalysisReport }) {
         )}
       </Card>
 
-      {safe.length > 0 && (
+      {rest.length > 0 && (
         <p className="text-xs text-zinc-500">
-          {safe.length} of your players have a clause no rival is estimated to
-          afford. Rival cash is reconstructed from the transfer ledger because
-          this league hides funds, so treat the ordering as reliable and the
-          amounts as approximate.
+          {unwanted > 0 && (
+            <>
+              {unwanted} more of your players carry a clause still well above
+              what they are worth, with nothing closing the gap.{" "}
+            </>
+          )}
+          {shut > 0 && (
+            <>
+              {shut} cannot be paid for by anyone yet, whatever they look
+              like.{" "}
+            </>
+          )}
+          Rival cash is reconstructed from the transfer ledger because this
+          league hides funds, and no prize money has been captured into it yet,
+          so those estimates are low — which is why a clause at or under value
+          is listed above regardless of what the estimate says.
         </p>
       )}
 

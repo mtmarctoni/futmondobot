@@ -53,6 +53,7 @@ function player(over: Partial<Evaluated> = {}): Evaluated {
     unavailableReason: null,
     availability: "fit",
     valueDelta: 0,
+    valueTrendDays: 7,
     sampleRounds: 3,
     expectedPoints: 4,
     pointsPerMillion: 0.4,

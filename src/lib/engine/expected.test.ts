@@ -222,6 +222,7 @@ describe("evaluate", () => {
       currentValue: 21_000_000,
       delta: 1_000_000,
       days: 7,
+      spanDays: 6,
     };
     const player = evaluate(BASE, context({ trends: new Map([["p1", rising]]) }));
     expect(player.valueDelta).toBe(1_000_000);
