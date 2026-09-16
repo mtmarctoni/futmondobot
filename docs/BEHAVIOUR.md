@@ -293,9 +293,10 @@ players get end-of-local-day + 2, and reconciling those into a rule would be
 guessing about a decision that spends millions.
 
 **Attack.** A rival's player can be taken outright for their clause price — no
-bidding, no negotiation. Targets are ranked by lineup upgrade multiplied by
-points per million of clause, filtered to unlocked players we can actually
-afford whose window is open. Targets whose window opens later are reported
+bidding, no negotiation. Targets that improve the XI are ranked by lineup
+upgrade multiplied by points per million of clause, filtered to unlocked
+players we can actually afford whose window is open. Targets worth taking on
+price alone are ranked separately, below. Targets whose window opens later are reported
 separately, as planning information rather than as advice. Clause price comes
 from `/1/player/summary`, one call per player, which is why it is collected in
 batches on a slower schedule; the same call supplies `suggestedClause`,
@@ -315,19 +316,60 @@ clause headline. They never appear in the rising-value list as well: rendering
 one clause under both "free value" and "a bet on the trend" would be two
 different claims about the same number.
 
-**Rising-value bets** are the tier below: the clause is still above value, but
-value is climbing towards it while the owner leaves it pinned. The payoff is
-future value and needs the trend to hold, so it is stated as a bet and never as
-a discount. This distinction exists because the first version of the feature
-ranked clauses 20-80% *above* value as if they were free money, and the
+**Next to cross** is the tier below, and it is a countdown rather than a
+category. Golden is day zero: the clause a rival left pinned has been overtaken
+by the value beneath it. Every other clause in the league has a position on
+that same countdown, and the one number that orders them is **how many days
+until value reaches the clause** at the rate it is moving now. A clause on
+course to cross inside four weeks is listed; one that is not, at any ratio, is
+not an opportunity at any ranking. The payoff still needs the trend to hold, so
+it is stated as a bet and never as a discount — the first version of this
+feature ranked clauses 20-80% *above* value as if they were free money, and the
 correction that followed over-swung and hedged the genuinely free ones the same
 way.
 
+The ranking within that list is two halves of five points each:
+
+- **Gap** — how soon it crosses. Full marks when it already has, decaying to
+  nothing at the four-week horizon. A rate measured across one day of readings
+  keeps two thirds of its weight, because a single reading extrapolated across
+  four weeks is the thinnest evidence this engine produces — but not less,
+  because a thin crossing two days out is still more urgent than a solid one a
+  fortnight away.
+- **Worth** — expected points, capped at five, which a typical starter reaches.
+  The score used to have no points term at all, so it ranked Gudelj, a 2.5M
+  defender on 6.8 season points, above players many times his worth for the
+  crime of appreciating quickly. Absolute points rather than points per
+  million, for the reason `runMarket` already gives: efficiency is the right
+  question only when funds bind, and 202M sits idle in a 210M budget.
+
+**A value change is not a rate.** `valueDelta` is measured between the first
+and last snapshot inside a seven-day window, and snapshot coverage is uneven —
+a third of this league has a window one or two days wide. So the trend carries
+`spanDays` alongside it and every projection divides by that, and every
+sentence naming a move names the window it was measured over. Reading a
+one-day move as a week's put the crossing it implied seven times too far away.
+
 **Defence.** Blocking a clause now costs 200 mondos a player a week, so the app
-does not recommend or automate it: defence is reporting who could be taken. It
-lists our players who are attractively priced, affordable to at least one rival,
-and actually takeable today, with the rival who would pay for each; a player
-whose clause price no rival's estimated funds reach is reported with that reason.
+does not recommend or automate it: defence is reporting who could be taken.
+
+It reports it by running the identical arithmetic on our own squad — same
+countdown, same score, pointed the other way — so the order it lists is the
+order a rival raids us in. Ordering it by points per million, which is what it
+used to do, answered a different question: which of ours is good value, rather
+than which of ours is about to be cheap. Only the players on the countdown are
+listed; the rest of a squad is players a rival could technically pay for and
+would never want, and listing all of them is how the three that matter get
+scrolled past.
+
+One rule differs from the attack side. A player is treated as takeable today if
+the clause is open and either some rival is estimated to afford it **or** the
+clause has already fallen under his value. Rival funds are reconstructed from a
+ledger holding no prize money at all, so they are understated — in exactly the
+direction that makes the squad look safe. A clause at or under value is a
+reading off two published numbers; affordability is a guess, and a reading
+outranks a guess.
+
 When nothing is takeable yet it says when that changes, so the window is not a
 surprise. It never says "block this".
 

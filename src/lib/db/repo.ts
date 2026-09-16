@@ -425,6 +425,22 @@ export interface ValueTrend {
   delta: number;
   /** Days of data actually available, so callers can discount thin history. */
   days: number;
+  /**
+   * Calendar days actually spanned by `delta`, first reading to last.
+   *
+   * Not the same as `days`, which counts rows: a player with two snapshots
+   * taken a day apart has `days: 2` and `spanDays: 1`. The distinction matters
+   * because `delta` is a change, and a change is only a rate once divided by
+   * the time it took. Reading `delta` as "the last week" is wrong for a third
+   * of this league — 54 of 219 players have a two-snapshot window and 12 have
+   * one — and treating a one-day move as a weekly one overstates the trend
+   * sevenfold, in the direction that makes a clause look more urgent than it
+   * is. Zero when there is only a single reading, which means no rate can be
+   * computed at all rather than a rate of zero.
+   *
+   * Computed in SQL so the subtraction never touches a `date` column in JS.
+   */
+  spanDays: number;
 }
 
 /**
@@ -445,14 +461,16 @@ export async function getValueTrends(days = 7): Promise<ValueTrend[]> {
         player_id,
         min(snapshot_date) AS first_date,
         max(snapshot_date) AS last_date,
-        count(*)           AS days
+        count(*)           AS days,
+        max(snapshot_date) - min(snapshot_date) AS span_days
       FROM window_rows GROUP BY player_id
     )
     SELECT
       b.player_id,
       last_row.value  AS current_value,
       first_row.value AS first_value,
-      b.days
+      b.days,
+      b.span_days
     FROM bounds b
     JOIN window_rows first_row
       ON first_row.player_id = b.player_id AND first_row.snapshot_date = b.first_date
@@ -464,6 +482,7 @@ export async function getValueTrends(days = 7): Promise<ValueTrend[]> {
     currentValue: Number(r.current_value),
     delta: Number(r.current_value) - Number(r.first_value),
     days: Number(r.days),
+    spanDays: Number(r.span_days),
   }));
 }
 

@@ -67,9 +67,31 @@ export interface StealCandidate {
   reason: string;
 }
 
+/**
+ * One of ours, scored exactly as a rival scores us.
+ *
+ * Attack and defence are the same arithmetic on the same two numbers; the only
+ * difference is who profits. So this row carries the same `ratio`,
+ * `daysToValue` and `opportunity` a `ClauseBet` does, from the same function,
+ * and the list is ordered the way a rival's raid list would be. Ordering it by
+ * points per million — what it used to do — answered a different question:
+ * which of ours is good value, rather than which of ours is about to be
+ * cheap.
+ */
 export interface ExposedPlayer {
   player: Evaluated;
   clausePrice: number;
+  /** Market value / clause price. At or above 1 he is takeable under value. */
+  ratio: number;
+  /**
+   * Days until his own value reaches his clause. Zero when it already has,
+   * null when it is not on course to inside the horizon.
+   */
+  daysToValue: number | null;
+  /** Which tier a rival looking at him would file him under. */
+  tier: ExposureTier;
+  /** 0-10, the score a rival computes when looking at him. */
+  opportunity: number;
   /** Expected points per million of clause — high means attractive to steal. */
   efficiency: number;
   /** Rivals who could pay the clause today. */
@@ -77,6 +99,18 @@ export interface ExposedPlayer {
   alreadyLocked: boolean;
   /** ISO instant the clause becomes payable, when it is not payable yet. */
   availableFrom: string | null;
+  /**
+   * Whether to treat him as takeable today.
+   *
+   * Deliberately not "some rival is estimated to afford it". Rival funds are
+   * reconstructed from the ledger and `money_events` is currently empty, so
+   * prize money is missing from every estimate and funds are understated — in
+   * the direction that makes our squad look safer than it is. A clause at or
+   * under value is a reading; affordability is a guess, and a reading outranks
+   * a guess. So a player the market has already overtaken counts as at risk
+   * whatever the estimate says.
+   */
+  atRisk: boolean;
   reason: string;
 }
 
@@ -88,6 +122,10 @@ export interface ClauseReport {
    * dropping them silently would hide a bargain unlocking in two days.
    */
   pendingSteals: StealCandidate[];
+  /**
+   * Our own squad in the order a rival would raid it: the same countdown, the
+   * same score, pointed the other way. Nothing here advises a block.
+   */
   exposed: ExposedPlayer[];
   /**
    * Rival players whose clause the market has already overtaken: the clause
@@ -140,13 +178,6 @@ export interface ClauseContext {
   now?: Date;
 }
 
-/**
- * Efficiency threshold above which a player is considered a bargain at their
- * clause. Roughly "a point per round for every 8M paid" — tuned so that a
- * typical fairly-priced starter sits just below it.
- */
-const BARGAIN_EFFICIENCY = 0.125;
-
 // ---------------------------------------------------------------------------
 // Clauses worth paying, in two tiers that must not be confused with each other.
 //
@@ -175,13 +206,51 @@ const BARGAIN_EFFICIENCY = 0.125;
 //           never as a discount.
 // ---------------------------------------------------------------------------
 
-/** Minimum 7-day value rise (euros) to count as a rising trend. */
-const BET_TREND_MIN_DELTA = 250_000;
 /**
- * Loosest value/clause ratio worth betting on. Clause 43% or more above value
- * is an overpay no trend justifies.
+ * How far ahead a value trend is worth extrapolating, in days.
+ *
+ * Four rounds. Past that the projection is arithmetic rather than
+ * information: Lamine Yamal's value climbs 4.6M a week and would reach his
+ * 177M clause in 102 days, which is not a plan.
+ *
+ * One constant does two jobs on purpose. It decides which clauses are close
+ * enough to qualify as a forward bet, and it sets the slope down which the
+ * opportunity score decays as the crossing recedes — so "is this worth
+ * listing at all" and "how high does it rank" cannot drift apart, which is
+ * what a separate ratio cutoff and a separate score let them do.
  */
-const BET_RATIO_MIN = 0.7;
+const CROSSOVER_HORIZON_DAYS = 28;
+
+/**
+ * Minimum value movement per day to count as a trend rather than drift.
+ *
+ * About 250k a week — the bar this engine already used — but applied to a
+ * rate instead of a raw delta. The raw delta was a misreading waiting to
+ * happen: a third of this league has a snapshot window one or two days wide,
+ * so "up 250k in the last week" was sometimes a single day's move wearing a
+ * week's label, and a projection built on it crossed seven times too soon.
+ */
+const BET_TREND_MIN_PER_DAY = 35_000;
+
+/**
+ * Trend readings this far apart carry full weight; a shorter window keeps two
+ * thirds of it. A one-day rate extrapolated across four weeks is the thinnest
+ * evidence this engine produces and must not rank level with a week of daily
+ * readings saying the same thing.
+ *
+ * Two thirds rather than something harsher because the damping must not
+ * invert the ranking it is correcting. A thinly-evidenced crossing two days
+ * out is still more urgent than a well-evidenced one a fortnight out, and a
+ * discount steep enough to reverse that would be trading one wrong order for
+ * another.
+ */
+const FULL_TREND_DAYS = 3;
+const THIN_TREND_FLOOR = 0.5;
+
+/** Halves of the opportunity score: how cheap it is, and whether he is worth having. */
+const GAP_MAX = 5;
+const WORTH_MAX = 5;
+
 /**
  * Tightest value/clause ratio that still counts as buying at market price, so
  * the clause is free value rather than a bet on the trend.
@@ -202,6 +271,13 @@ const GOLDEN_RATIO_MIN = 0.95;
  */
 export type ClauseTier = "golden" | "trend";
 
+/**
+ * The tiers, plus the one a rival's player can never be in: `priced` means the
+ * clause sits above value with no crossing in view. Only our own squad gets
+ * it, because a rival's player in that state is simply not listed.
+ */
+export type ExposureTier = ClauseTier | "priced";
+
 export interface ClauseBet {
   tier: ClauseTier;
   player: Evaluated;
@@ -212,6 +288,15 @@ export interface ClauseBet {
   ratio: number;
   /** Market value minus clause price, in euros. Negative when clause > value. */
   discount: number;
+  /**
+   * Days until his value reaches his clause, at the rate it is moving now.
+   * Zero when it already has, null when it is not on course to at all.
+   *
+   * This is the spine of the ranking below the golden line. Golden is not a
+   * category so much as day zero of a countdown, and every other clause in
+   * the league has a position on it.
+   */
+  daysToValue: number | null;
   /** 0-10 composite opportunity score. */
   opportunity: number;
   affordable: boolean;
@@ -237,6 +322,121 @@ export function clauseOpen(
   const opens = new Date(clauseDate).getTime();
   if (Number.isNaN(opens)) return true;
   return opens <= now.getTime();
+}
+
+/**
+ * The arithmetic both halves of this file run, on a rival's player and on our
+ * own alike.
+ *
+ * Kept as one exported function rather than two similar blocks because the
+ * moment attack and defence compute "how cheap is he" differently, one of the
+ * two is wrong and nothing says which. A rival looking at our squad runs this;
+ * so do we, looking at theirs.
+ */
+export interface ClauseMath {
+  /** Market value / clause price. */
+  ratio: number;
+  /** Value minus clause, in euros. Negative while the clause is still ahead. */
+  discount: number;
+  /** Euros of value added per day, or null when no rate can be computed. */
+  valuePerDay: number | null;
+  /**
+   * Days until value reaches the clause. Zero when it already has; null when
+   * the value is flat, falling, or drifting too slowly to call a trend.
+   */
+  daysToValue: number | null;
+  /** 0-10. Half how soon it is cheap, half whether he is worth having. */
+  opportunity: number;
+}
+
+export function clauseMath(player: Evaluated, clausePrice: number): ClauseMath {
+  const ratio = clausePrice > 0 ? player.value / clausePrice : 0;
+  const discount = player.value - clausePrice;
+
+  // A delta is not a rate until it is divided by the time it took, and the
+  // time it took varies across this league by a factor of seven.
+  const valuePerDay =
+    player.valueTrendDays > 0
+      ? player.valueDelta / player.valueTrendDays
+      : null;
+
+  const daysToValue =
+    discount >= 0
+      ? 0
+      : valuePerDay === null || valuePerDay < BET_TREND_MIN_PER_DAY
+        ? null
+        : -discount / valuePerDay;
+
+  return {
+    ratio,
+    discount,
+    valuePerDay,
+    daysToValue,
+    opportunity: opportunityScore(player, daysToValue),
+  };
+}
+
+/**
+ * Two halves, five points each, because a clause opportunity is two questions
+ * and the old score only asked one of them.
+ *
+ * `gap` is how soon the clause stops costing more than the player is worth.
+ * `worth` is whether the player is worth owning at all — which the previous
+ * score ignored entirely, and so ranked a 2.5M defender on 6.8 season points
+ * above Pedri for the crime of appreciating quickly. Expected points already
+ * carry availability, start probability and fixture, so an injured player
+ * scores nothing here without a special case.
+ *
+ * Absolute points, not points per million: with 202M idle in a 210M budget
+ * and no yield on cash, efficiency is the wrong regime — the same argument
+ * `runMarket` already makes about ranking buys.
+ */
+function opportunityScore(player: Evaluated, daysToValue: number | null): number {
+  const gap =
+    daysToValue === null
+      ? 0
+      : daysToValue === 0
+        ? // Already crossed. This is a reading off two published numbers, not
+          // a projection, so no confidence discount applies to it.
+          GAP_MAX
+        : GAP_MAX *
+          clamp(1 - daysToValue / CROSSOVER_HORIZON_DAYS, 0, 1) *
+          trendConfidence(player);
+
+  const worth = clamp(player.expectedPoints, 0, WORTH_MAX);
+  return clamp(gap + worth, 0, 10);
+}
+
+/** How much to believe a rate measured across this few days. */
+function trendConfidence(player: Evaluated): number {
+  if (player.valueTrendDays <= 0) return 0;
+  const settled = clamp(player.valueTrendDays / FULL_TREND_DAYS, 0, 1);
+  return THIN_TREND_FLOOR + (1 - THIN_TREND_FLOOR) * settled;
+}
+
+/**
+ * The countdown in words. Empty when there is nothing to count down to, so
+ * callers can drop it from a sentence rather than print "in null days".
+ */
+function describeCountdown(daysToValue: number | null): string {
+  if (daysToValue === null || daysToValue === 0) return "";
+  if (daysToValue < 1.5) return "reaches it inside a day";
+  return `reaches it in about ${Math.round(daysToValue)} days`;
+}
+
+/**
+ * The value move with the window it was measured over, always both.
+ *
+ * "Up 1.8M in the last week" was printed for players whose window was a
+ * single day. Naming the window is the whole fix: the reader can then see
+ * that a big move over one reading is a big move over one reading.
+ */
+function describeTrend(player: Evaluated): string {
+  if (player.valueTrendDays <= 0 || player.valueDelta === 0) return "";
+  const window =
+    player.valueTrendDays === 1 ? "a day" : `${player.valueTrendDays} days`;
+  const direction = player.valueDelta > 0 ? "up" : "down";
+  return `Value ${direction} ${fmtMoney(Math.abs(player.valueDelta))} over ${window} of readings`;
 }
 
 export function runClauses(ctx: ClauseContext): ClauseReport {
@@ -388,18 +588,24 @@ function findClauseOpportunities(
     if (player.value <= 0) continue;
 
     const clausePrice = player.clausePrice;
-    const ratio = player.value / clausePrice;
-    const isGolden = ratio >= GOLDEN_RATIO_MIN;
+    const math = clauseMath(player, clausePrice);
+    const isGolden = math.ratio >= GOLDEN_RATIO_MIN;
 
-    // The trend minimum exists to stop noise being sold as a bet. A clause the
-    // market has already overtaken is not a bet, so the trend has no say in
-    // whether it qualifies — only in how it is explained.
+    // A clause the market has already overtaken is not a bet, so the trend
+    // has no say in whether it qualifies — only in how it is explained.
+    //
+    // Below that line the question stops being "how cheap is it" and becomes
+    // "how soon is it cheap". One test answers it: a clause whose value is
+    // not on course to reach it inside the horizon is not an opportunity at
+    // any ranking, and one that is belongs in the list however far off it
+    // still looks today. This replaced a pair of cutoffs on the ratio and the
+    // raw weekly delta, which were two proxies for this question that could
+    // disagree with it and with each other.
     if (!isGolden) {
-      if (player.valueDelta <= BET_TREND_MIN_DELTA) continue;
-      if (ratio < BET_RATIO_MIN) continue;
+      if (math.daysToValue === null) continue;
+      if (math.daysToValue > CROSSOVER_HORIZON_DAYS) continue;
     }
 
-    const discount = player.value - clausePrice;
     const affordable = clausePrice <= Math.min(ceiling, ctx.funds);
     const availableFrom = clauseOpen(player.clauseDate, now)
       ? null
@@ -410,9 +616,10 @@ function findClauseOpportunities(
       clausePrice,
       ownerTeamId: player.ownerTeamId,
       ownerName: ctx.teamNames.get(player.ownerTeamId) ?? null,
-      ratio,
-      discount,
-      opportunity: clauseBetOpportunity(ratio, player.valueDelta),
+      ratio: math.ratio,
+      discount: math.discount,
+      daysToValue: math.daysToValue,
+      opportunity: math.opportunity,
       affordable,
       availableFrom,
       clauseDateKnown,
@@ -442,9 +649,12 @@ function findClauseOpportunities(
       if (b.ratio !== a.ratio) return b.ratio - a.ratio;
       return b.discount - a.discount;
     }),
+    // By opportunity, which is the countdown weighted by whether the player
+    // is worth having when it runs out. Affordable first, as everywhere.
     trendBets: trendBets.sort((a, b) => {
       if (a.affordable !== b.affordable) return a.affordable ? -1 : 1;
-      return b.opportunity - a.opportunity;
+      if (b.opportunity !== a.opportunity) return b.opportunity - a.opportunity;
+      return (a.daysToValue ?? Infinity) - (b.daysToValue ?? Infinity);
     }),
   };
 }
@@ -486,7 +696,7 @@ function goldenReason(args: {
   // Supporting evidence, not the payoff: the gap above is already banked.
   const trend =
     player.valueDelta > 0
-      ? `Value up ${fmtMoney(player.valueDelta)} in the last week while the clause stayed where the owner left it, so the gap is still opening.`
+      ? `${describeTrend(player)} while the clause stayed where the owner left it, so the gap is still opening.`
       : "";
 
   const when = availableFrom
@@ -498,20 +708,20 @@ function goldenReason(args: {
   return [standing, trend, when].filter(Boolean).join(" ");
 }
 
-function clauseBetOpportunity(ratio: number, valueDelta: number): number {
-  // Mostly the trend: how much value is adding every week. The ratio adds up
-  // to three points for being at or below current value, less the further the
-  // clause sits above it.
-  const trendScore = clamp(valueDelta / 1_000_000, 0, 4);
-  const ratioScore = ratio >= 1 ? 3 : clamp((ratio - 0.6) * 7.5, 0, 3);
-  return clamp(trendScore + ratioScore, 0, 10);
-}
-
+/**
+ * Why a clause below the golden line is worth watching, led by the countdown.
+ *
+ * The countdown comes first because it is the decision. "0.83x ratio" tells a
+ * reader where a player stands; "his value reaches the clause in about three
+ * days" tells them when to act, which is the entire point of ranking these
+ * ahead of the rivals who own them.
+ */
 function clauseBetReason(args: {
   player: Evaluated;
   clausePrice: number;
   ratio: number;
   discount: number;
+  daysToValue: number | null;
   affordable: boolean;
   availableFrom: string | null;
   clauseDateKnown: boolean;
@@ -520,8 +730,8 @@ function clauseBetReason(args: {
   const {
     player,
     clausePrice,
-    ratio,
     discount,
+    daysToValue,
     affordable,
     availableFrom,
     clauseDateKnown,
@@ -532,27 +742,38 @@ function clauseBetReason(args: {
     return `Clause is ${fmtMoney(clausePrice)}, beyond the ${fmtMoney(funds)} available.`;
   }
 
-  const gap =
-    discount >= 0
-      ? `It already sits ${fmtMoney(discount)} under today's value. `
-      : `It is ${fmtMoney(-discount)} above today's value — the payoff is future value, not today's. `;
+  const countdown = describeCountdown(daysToValue);
+  const lead = countdown
+    ? `Clause ${fmtMoney(clausePrice)} is ${fmtMoney(-discount)} above a ${fmtMoney(player.value)} value, and ${countdown} at the rate it is moving.`
+    : `Clause ${fmtMoney(clausePrice)} against a ${fmtMoney(player.value)} value.`;
+
+  const evidence = describeTrend(player);
+  const trend = evidence ? `${evidence}.` : "";
 
   const when = availableFrom
-    ? `Not payable until ${formatWhen(availableFrom)}. `
+    ? `Not payable until ${formatWhen(availableFrom)}.`
     : clauseDateKnown
       ? ""
-      : "Clause window has not been read yet — check the date in Futmondo before paying. ";
+      : "Clause window has not been read yet — check the date in Futmondo before paying.";
 
   return [
-    `${ratio.toFixed(1)}x ratio — clause ${fmtMoney(clausePrice)} vs value ${fmtMoney(player.value)}.`,
-    gap,
-    `Value up ${fmtMoney(player.valueDelta)} in the last week; if the trend holds, this clause is the cheap way in before the owner raises it. Bet pays only if value keeps rising.`,
-    when.trim(),
+    lead,
+    trend,
+    "Paying now buys the crossing early; the bet pays only if value keeps rising.",
+    when,
   ]
     .filter(Boolean)
     .join(" ");
 }
 
+/**
+ * Our own squad, scored from the other side of the table.
+ *
+ * Same `clauseMath`, same countdown, same score — so the order this returns is
+ * the order a rival running our own engine against us would raid in. That is
+ * the only ordering that answers "which of mine goes first", and it is not the
+ * one this list used to have.
+ */
 function findExposed(ctx: ClauseContext, now: Date): ExposedPlayer[] {
   const rivals = ctx.rivalFunds.filter((r) => r.teamId !== ctx.myTeamId);
   const locked = ctx.lockedPlayerIds ?? new Set<string>();
@@ -561,11 +782,20 @@ function findExposed(ctx: ClauseContext, now: Date): ExposedPlayer[] {
     .filter((p) => p.clausePrice !== null && p.clausePrice > 0)
     .map((player) => {
       const clausePrice = player.clausePrice as number;
+      const math = clauseMath(player, clausePrice);
       const priceM = millions(clausePrice);
       const efficiency = priceM > 0 ? player.expectedPoints / priceM : 0;
       const availableFrom = clauseOpen(player.clauseDate, now)
         ? null
         : (player.clauseDate as string);
+
+      const tier: ExposureTier =
+        math.ratio >= GOLDEN_RATIO_MIN
+          ? "golden"
+          : math.daysToValue !== null &&
+              math.daysToValue <= CROSSOVER_HORIZON_DAYS
+            ? "trend"
+            : "priced";
 
       const threats = rivals
         .filter((r) => r.estimatedFunds >= clausePrice)
@@ -581,24 +811,47 @@ function findExposed(ctx: ClauseContext, now: Date): ExposedPlayer[] {
       const alreadyLocked =
         player.clauseLocked === true || locked.has(player.playerId);
 
+      // See ExposedPlayer.atRisk: a reading beats an estimate, so a clause the
+      // market has overtaken counts even where no rival is thought to afford
+      // it. Every other case still defers to the funds estimate.
+      const atRisk =
+        availableFrom === null &&
+        !alreadyLocked &&
+        (threats.length > 0 || tier === "golden");
+
       return {
         player,
         clausePrice,
+        ratio: math.ratio,
+        daysToValue: math.daysToValue,
+        tier,
+        opportunity: math.opportunity,
         efficiency,
         threats,
         alreadyLocked,
         availableFrom,
+        atRisk,
         reason: exposureReason({
           player,
           clausePrice,
-          efficiency,
+          discount: math.discount,
+          daysToValue: math.daysToValue,
+          tier,
           threatCount: threats.length,
           alreadyLocked,
           availableFrom,
         }),
       };
     })
-    .sort((a, b) => b.efficiency - a.efficiency);
+    .sort((a, b) => {
+      // Nobody can take a player whose clause has not opened, however cheap
+      // he looks, so those sort below everything that is takeable today.
+      const aOpen = a.availableFrom === null;
+      const bOpen = b.availableFrom === null;
+      if (aOpen !== bOpen) return aOpen ? -1 : 1;
+      if (b.opportunity !== a.opportunity) return b.opportunity - a.opportunity;
+      return (a.daysToValue ?? Infinity) - (b.daysToValue ?? Infinity);
+    });
 }
 
 function stealReason(args: {
@@ -657,31 +910,63 @@ function stealReason(args: {
   return `${fmtMoney(clausePrice)} for ${versus}.${bargain}${suggested}${when}`;
 }
 
+/**
+ * What a rival sees when they look at one of ours, in the same words we use
+ * looking at theirs. Nothing here recommends a block: blocking costs 200
+ * mondos a player a week and the budget is held, so this reports and stops.
+ */
 function exposureReason(args: {
   player: Evaluated;
   clausePrice: number;
-  efficiency: number;
+  discount: number;
+  daysToValue: number | null;
+  tier: ExposureTier;
   threatCount: number;
   alreadyLocked: boolean;
   availableFrom: string | null;
 }): string {
-  const { clausePrice, efficiency, threatCount, alreadyLocked, availableFrom } =
-    args;
+  const {
+    player,
+    clausePrice,
+    discount,
+    daysToValue,
+    tier,
+    threatCount,
+    alreadyLocked,
+    availableFrom,
+  } = args;
 
   if (alreadyLocked) return "Blocked, so safe.";
   if (availableFrom) {
     return `Clause ${fmtMoney(clausePrice)}, not payable by anyone until ${formatWhen(availableFrom)}.`;
   }
-  if (threatCount === 0) {
-    return `Clause ${fmtMoney(clausePrice)} — no rival is estimated to have that much.`;
+
+  const takers =
+    threatCount === 0
+      ? "No rival is estimated to have that much, though funds are reconstructed from a ledger that is missing prize money, so treat that as the weakest claim here."
+      : `${threatCount} rival${threatCount > 1 ? "s" : ""} could pay it.`;
+
+  if (tier === "golden") {
+    return [
+      discount >= 0
+        ? `Clause ${fmtMoney(clausePrice)} is ${fmtMoney(discount)} under his own ${fmtMoney(player.value)} value — anyone can take him for less than he is worth, today.`
+        : `Clause ${fmtMoney(clausePrice)} is level with his ${fmtMoney(player.value)} value — he is takeable at market price, today.`,
+      takers,
+    ].join(" ");
   }
-  const attractiveness =
-    efficiency >= BARGAIN_EFFICIENCY
-      ? "a bargain at that price"
-      : "fairly priced";
-  return `Clause ${fmtMoney(clausePrice)}, ${attractiveness}; ${threatCount} rival${
-    threatCount > 1 ? "s" : ""
-  } could pay it.`;
+
+  if (tier === "trend") {
+    const countdown = describeCountdown(daysToValue);
+    return [
+      `Clause ${fmtMoney(clausePrice)} against a ${fmtMoney(player.value)} value, and ${countdown} at the rate it is moving.`,
+      describeTrend(player) ? `${describeTrend(player)}.` : "",
+      takers,
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  return `Clause ${fmtMoney(clausePrice)}, ${fmtMoney(-discount)} above his ${fmtMoney(player.value)} value and not closing. ${takers}`;
 }
 
 function headline(
@@ -695,6 +980,20 @@ function headline(
   // clause decision that needs nothing believed about the future and the one
   // that disappears the moment the owner notices. Pending and unaffordable
   // ones are left to the full list: neither is something to do today.
+  // A player nobody can take today is not exposed today. The unaffordable and
+  // not-yet-open cases are surfaced in the full list; the headline names only
+  // the immediately takeable risk, and as information, never as an instruction.
+  // `exposed` is already sorted the way a rival would read it, so the first
+  // at-risk row is the one to name.
+  const topRisk = exposed.find((e) => e.atRisk);
+  // The symmetric loss deserves a clause of its own when it is the same kind
+  // of thing: one of ours the market has already overtaken is free value to
+  // nine other people, and no amount of attacking changes that.
+  const crossed =
+    topRisk && topRisk.tier === "golden"
+      ? ` ${topRisk.player.name} is in the same position on your side, at ${fmtMoney(topRisk.clausePrice)} against a ${fmtMoney(topRisk.player.value)} value.`
+      : "";
+
   const topGolden = golden.find(
     (g) => g.affordable && g.availableFrom === null,
   );
@@ -705,16 +1004,10 @@ function headline(
         : `level with his ${fmtMoney(topGolden.player.value)} value`;
     return `${topGolden.player.name} is clausable at ${fmtMoney(
       topGolden.clausePrice,
-    )}, ${gap}. Free value while the owner leaves the clause where it is.`;
+    )}, ${gap}. Free value while the owner leaves the clause where it is.${crossed}`;
   }
 
   const topSteal = steals.find((s) => s.affordable);
-  // A player nobody can take today is not exposed today. The unaffordable and
-  // not-yet-open cases are surfaced in the full list; the headline names only
-  // the immediately takeable risk, and as information, never as an instruction.
-  const topRisk = exposed.find(
-    (e) => e.availableFrom === null && !e.alreadyLocked && e.threats.length > 0,
-  );
 
   if (topSteal && topRisk) {
     return `Take ${topSteal.player.name} for ${fmtMoney(topSteal.clausePrice)} (+${topSteal.upgrade.toFixed(
@@ -745,4 +1038,4 @@ function headline(
   return "No clause opportunities, and nothing of yours looks exposed.";
 }
 
-export { BARGAIN_EFFICIENCY, GOLDEN_RATIO_MIN };
+export { CROSSOVER_HORIZON_DAYS, GOLDEN_RATIO_MIN };

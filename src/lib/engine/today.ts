@@ -6,7 +6,12 @@
  * bid with a clock on it outranks a marginal buy; a buy can wait. Anything
  * that needs no action is deliberately not listed.
  */
-import type { ClauseReport, ClauseBet, StealCandidate } from "./clauses";
+import type {
+  ClauseReport,
+  ClauseBet,
+  ExposedPlayer,
+  StealCandidate,
+} from "./clauses";
 import type { DepartedPlayer } from "./departed";
 import type { LineupChange, LineupPick } from "./lineup";
 import type { MarketReport, OwnListing } from "./market";
@@ -100,6 +105,7 @@ export function buildToday(input: TodayInput): TodayReport {
     ),
   );
   actions.push(...clauseBetActions(input.clauses.trendBets));
+  actions.push(...exposureActions(input.clauses.exposed));
   // Departures already have their own action, and a duplicate sell for the
   // same player reads as two separate problems.
   actions.push(
@@ -359,6 +365,11 @@ function stealActions(
  * discounts. Ranked below market buys: a current, priced opportunity beats a
  * forward bet. Capped at 3.
  */
+/**
+ * On the two-halves scale this is "crosses inside about three weeks and is a
+ * player worth having when it does". A squad filler crossing tomorrow scores
+ * its gap and almost no worth, and stays off today's list where it belongs.
+ */
 const MIN_BET_OPPORTUNITY = 5;
 
 function clauseBetActions(trendBets: ClauseBet[]): Action[] {
@@ -376,6 +387,39 @@ function clauseBetActions(trendBets: ClauseBet[]): Action[] {
       money: -bet.clausePrice,
       playerId: bet.player.playerId,
       playerName: bet.player.name,
+    }));
+}
+
+/**
+ * One of ours the league can take cheaply today.
+ *
+ * Information, never an instruction: blocking costs 200 mondos a player a week
+ * and nothing in this app spends them, so there is no button and no
+ * recommendation attached. It earns a place on today's list anyway because it
+ * is the one piece of clause news that is entirely outside our control and
+ * gets worse while unwatched — a clause is fixed at acquisition and the value
+ * under it keeps climbing.
+ *
+ * Weight 57: below anything payable today, above the planning notes. Only the
+ * worst two, and only where the clause is genuinely open.
+ */
+function exposureActions(exposed: ExposedPlayer[]): Action[] {
+  return exposed
+    .filter((e) => e.atRisk && e.tier !== "priced")
+    .slice(0, 2)
+    .map((risk, index) => ({
+      id: `exposed-${risk.player.playerId}`,
+      kind: "info" as const,
+      weight: 57 - index,
+      urgency: "whenever" as const,
+      title:
+        risk.tier === "golden"
+          ? `${risk.player.name} is takeable at or under his own value — ${fmtMoney(risk.clausePrice)} against ${fmtMoney(risk.player.value)}`
+          : `${risk.player.name}'s clause is about to fall under his value — ${fmtMoney(risk.clausePrice)} against ${fmtMoney(risk.player.value)}`,
+      detail: risk.reason,
+      pointsAtStake: 0,
+      playerId: risk.player.playerId,
+      playerName: risk.player.name,
     }));
 }
 

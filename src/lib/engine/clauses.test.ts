@@ -35,6 +35,7 @@ function player(over: Partial<Evaluated> = {}): Evaluated {
     unavailableReason: null,
     availability: "fit",
     valueDelta: 0,
+    valueTrendDays: 7,
     sampleRounds: 3,
     expectedPoints: 5,
     pointsPerMillion: 0.5,
@@ -174,7 +175,7 @@ describe("runClauses and the clause window", () => {
       context({ allPlayers: [mine], squad: [mine], starterIds: new Set(["mine"]) }),
     );
     expect(report.exposed[0].threats).toHaveLength(0);
-    expect(report.exposed[0].reason).toMatch(/no rival is estimated/);
+    expect(report.exposed[0].reason).toMatch(/No rival is estimated/);
   });
 });
 
@@ -300,10 +301,14 @@ describe("findClauseBets", () => {
     expect(bet.player.playerId).toBe("target");
     expect(bet.ratio).toBeCloseTo(0.83, 2);
     expect(bet.discount).toBe(-3_000_000);
-    // trendScore 3.32 + ratioScore 1.75
-    expect(bet.opportunity).toBeCloseTo(5.07, 2);
-    expect(bet.reason).toContain("above today's value");
-    expect(bet.reason).toContain("Value up 3.32M€ in the last week");
+    // 3.32M over 7 days is 474k a day, and 3M of gap to close: 6.3 days.
+    expect(bet.daysToValue).toBeCloseTo(6.33, 2);
+    // gap 5 * (1 - 6.33/28) = 3.87, plus 5 expected points.
+    expect(bet.opportunity).toBeCloseTo(8.87, 2);
+    expect(bet.reason).toContain("reaches it in about 6 days");
+    // The window is always named alongside the move, because the same 3.32M
+    // measured over one day would mean something seven times stronger.
+    expect(bet.reason).toContain("Value up 3.32M€ over 7 days of readings");
     expect(bet.reason).not.toMatch(/free money|giveaway|discount by any standard/i);
   });
 
@@ -395,10 +400,11 @@ describe("findClauseBets", () => {
 
     const bet = report.trendBets[0];
     expect(bet.discount).toBeLessThan(0);
-    // The honest signal is the trend, never a claim that the clause is cheap
-    // today.
-    expect(bet.reason).toMatch(/payoff is future value/);
+    // The honest signal is when it crosses, never a claim that the clause is
+    // cheap today.
+    expect(bet.reason).toMatch(/above a 15.0M€ value/);
     expect(bet.reason).toMatch(/pays only if value keeps rising/);
+    expect(bet.reason).not.toMatch(/under (today's|his own) value/);
   });
 
   it("marks expensive clauses as not affordable", () => {
@@ -474,63 +480,157 @@ describe("findClauseBets", () => {
     expect(report.trendBets[0].player.playerId).toBe("strong");
   });
 
-  it("treats the trend minimum as exclusive, so noise never sneaks in", () => {
-    // valueDelta exactly at BET_TREND_MIN_DELTA (250k) must not qualify.
-    const boundary = player({
-      playerId: "boundary",
+  it("reads a value move as a rate, never as a week", () => {
+    // The same 700k, measured across seven days of readings and across one.
+    // Before spanDays existed both were reported as "up 700k in the last
+    // week" and scored identically, so a player whose value jumped in a day
+    // ranked level with one that took a week to do it — and the crossing it
+    // implied was seven times further away than the engine believed.
+    const weekly = player({
+      playerId: "weekly",
       ownerTeamId: "rival",
       value: 14_000_000,
-      clausePrice: 20_000_000,
+      clausePrice: 15_400_000,
       clauseDate: OPENED_ALREADY,
-      valueDelta: 250_000,
+      valueDelta: 700_000,
+      valueTrendDays: 7,
       expectedPoints: 5,
     });
-    const atLimit = runClauses(context({ allPlayers: [boundary] }));
-    expect(atLimit.trendBets).toHaveLength(0);
+    const overnight = player({
+      ...weekly,
+      playerId: "overnight",
+      valueTrendDays: 1,
+    });
+    const report = runClauses(context({ allPlayers: [weekly, overnight] }));
 
-    // One euro more qualifies.
-    const justOver = runClauses(
+    const w = report.trendBets.find((b) => b.player.playerId === "weekly");
+    const o = report.trendBets.find((b) => b.player.playerId === "overnight");
+    expect(w!.daysToValue).toBeCloseTo(14, 2);
+    expect(o!.daysToValue).toBeCloseTo(2, 2);
+    expect(report.trendBets[0].player.playerId).toBe("overnight");
+    expect(w!.reason).toContain("over 7 days of readings");
+    expect(o!.reason).toContain("over a day of readings");
+  });
+
+  it("damps a rate measured across too few days to trust", () => {
+    // Identical crossings, five days apart in evidence. The thin one still
+    // appears — an unrecognised gap degrades rather than deletes — but it
+    // must not rank level with the one a week of readings agrees on.
+    const solid = player({
+      playerId: "solid",
+      ownerTeamId: "rival",
+      value: 14_000_000,
+      clausePrice: 15_400_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 1_400_000,
+      valueTrendDays: 7,
+      expectedPoints: 5,
+    });
+    const thin = player({
+      ...solid,
+      playerId: "thin",
+      valueDelta: 200_000,
+      valueTrendDays: 1,
+    });
+    const report = runClauses(context({ allPlayers: [solid, thin] }));
+
+    const a = report.trendBets.find((b) => b.player.playerId === "solid");
+    const b = report.trendBets.find((b) => b.player.playerId === "thin");
+    expect(a!.daysToValue).toBeCloseTo(7, 2);
+    expect(b!.daysToValue).toBeCloseTo(7, 2);
+    expect(a!.opportunity).toBeGreaterThan(b!.opportunity);
+    expect(report.trendBets[0].player.playerId).toBe("solid");
+  });
+
+  it("treats the per-day trend floor as inclusive, and drift below it misses", () => {
+    // 245k across 7 days is exactly 35k a day, and 980k of gap is exactly 28
+    // days at that rate: both boundaries at once, and both must admit it.
+    const atFloor = player({
+      playerId: "atFloor",
+      ownerTeamId: "rival",
+      value: 14_000_000,
+      clausePrice: 14_980_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 245_000,
+      valueTrendDays: 7,
+      expectedPoints: 5,
+    });
+    expect(runClauses(context({ allPlayers: [atFloor] })).trendBets).toHaveLength(1);
+
+    const drifting = runClauses(
       context({
         allPlayers: [
-          player({ ...boundary, playerId: "justOver", valueDelta: 251_000 }),
+          player({ ...atFloor, playerId: "drifting", valueDelta: 244_000 }),
         ],
       }),
     );
-    expect(justOver.trendBets).toHaveLength(1);
-    expect(justOver.trendBets[0].player.playerId).toBe("justOver");
+    expect(drifting.trendBets).toHaveLength(0);
   });
 
-  it("treats the ratio minimum as inclusive, and any hair below it misses", () => {
-    // value/clause = 14/20 = 0.70 exactly -> BET_RATIO_MIN qualifies.
-    const atMin = player({
-      playerId: "atMin",
+  it("lists a crossing inside the horizon and drops one beyond it", () => {
+    // The horizon replaced a ratio cutoff, which was only ever a proxy for
+    // this: a clause 30% above value is worth watching if value is closing
+    // fast, and worth nothing if it is not.
+    const inside = player({
+      playerId: "inside",
       ownerTeamId: "rival",
-      value: 14_000_000,
-      clausePrice: 20_000_000,
+      value: 10_000_000,
+      clausePrice: 12_800_000,
       clauseDate: OPENED_ALREADY,
-      valueDelta: 1_000_000,
+      valueDelta: 700_000,
+      valueTrendDays: 7,
       expectedPoints: 5,
     });
-    const reportAt = runClauses(context({ allPlayers: [atMin] }));
-    expect(reportAt.trendBets).toHaveLength(1);
+    const report = runClauses(context({ allPlayers: [inside] }));
+    expect(report.trendBets).toHaveLength(1);
+    expect(report.trendBets[0].daysToValue).toBeCloseTo(28, 2);
 
-    const justBelow = runClauses(
+    const beyond = runClauses(
       context({
         allPlayers: [
-          player({
-            ...atMin,
-            playerId: "justBelow",
-            value: 13_990_000,
-          }),
+          player({ ...inside, playerId: "beyond", clausePrice: 12_900_000 }),
         ],
       }),
     );
-    expect(justBelow.trendBets).toHaveLength(0);
+    expect(beyond.trendBets).toHaveLength(0);
   });
 
-  it("caps opportunity so a huge trend cannot inflate a score forever", () => {
-    // ratio 3 (>= 1 -> ratioScore 3) and valueDelta 9M (clamped to 4). A ratio
-    // that high is golden, so the capped score is read from that list.
+  it("ranks the player worth having above the one that merely appreciates", () => {
+    // The whole reason the score has a second half. On live data the old
+    // formula put Gudelj — a 2.5M defender on 6.8 season points — above
+    // players several times his worth, because it asked only how fast the
+    // value was moving.
+    const filler = player({
+      playerId: "filler",
+      ownerTeamId: "rival",
+      value: 2_520_000,
+      clausePrice: 2_690_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 980_000,
+      valueTrendDays: 7,
+      expectedPoints: 0.6,
+    });
+    const starter = player({
+      playerId: "starter",
+      ownerTeamId: "rival",
+      value: 10_420_000,
+      clausePrice: 11_630_000,
+      clauseDate: OPENED_ALREADY,
+      valueDelta: 2_700_000,
+      valueTrendDays: 7,
+      expectedPoints: 5,
+    });
+    const report = runClauses(context({ allPlayers: [filler, starter] }));
+
+    // The filler crosses sooner and is still listed — the ordering is the
+    // deliverable, not the exclusion.
+    const f = report.trendBets.find((b) => b.player.playerId === "filler");
+    const t = report.trendBets.find((b) => b.player.playerId === "starter");
+    expect(f!.daysToValue!).toBeLessThan(t!.daysToValue!);
+    expect(report.trendBets[0].player.playerId).toBe("starter");
+  });
+
+  it("caps opportunity at ten however good both halves are", () => {
     const huge = player({
       playerId: "huge",
       ownerTeamId: "rival",
@@ -538,42 +638,33 @@ describe("findClauseBets", () => {
       clausePrice: 10_000_000,
       clauseDate: OPENED_ALREADY,
       valueDelta: 9_000_000,
-      expectedPoints: 5,
+      valueTrendDays: 7,
+      expectedPoints: 40,
     });
-    // Same ratio, valueDelta only just over the 4M clamp point.
-    const justAtCap = player({
-      ...huge,
-      playerId: "justAtCap",
-      valueDelta: 4_000_000,
-    });
-    const report = runClauses(
-      context({ allPlayers: [huge, justAtCap] }),
-    );
+    const report = runClauses(context({ allPlayers: [huge] }));
 
     const h = report.golden.find((b) => b.player.playerId === "huge");
-    const c = report.golden.find((b) => b.player.playerId === "justAtCap");
     expect(h).toBeDefined();
-    expect(c).toBeDefined();
-    expect(h!.opportunity).toBe(7);
-    expect(c!.opportunity).toBe(7);
+    expect(h!.daysToValue).toBe(0);
+    expect(h!.opportunity).toBe(10);
   });
 
-  it("gives a floor score to a qualifying bet, never zero and never inflated", () => {
-    // Just past both minimums: delta 251k (0.251 score) + ratio 0.7 (0.75).
+  it("scores a distant crossing on a poor player low, but never at zero", () => {
     const floor = player({
       playerId: "floor",
       ownerTeamId: "rival",
       value: 14_000_000,
-      clausePrice: 20_000_000,
+      clausePrice: 14_980_000,
       clauseDate: OPENED_ALREADY,
-      valueDelta: 251_000,
-      expectedPoints: 5,
+      valueDelta: 245_000,
+      valueTrendDays: 7,
+      expectedPoints: 0.2,
     });
     const report = runClauses(context({ allPlayers: [floor] }));
 
     expect(report.trendBets).toHaveLength(1);
-    expect(report.trendBets[0].opportunity).toBeCloseTo(1.0, 2);
-    expect(report.trendBets[0].opportunity).toBeLessThanOrEqual(2);
+    // The crossing lands exactly on the horizon, so the gap half is spent.
+    expect(report.trendBets[0].opportunity).toBeCloseTo(0.2, 2);
   });
 
   it("flags an unread clause window instead of guessing it is open", () => {
@@ -890,5 +981,208 @@ describe("golden clauses", () => {
     const report = runClauses(context({ allPlayers: [target] }));
 
     expect(report.headline).not.toMatch(/^Luismi Cruz/);
+  });
+});
+
+/**
+ * Defence, which is the same arithmetic pointed the other way.
+ *
+ * The exposure list used to be ordered by points per million, which answers
+ * "which of mine is good value" — a question nobody asked. What a manager
+ * needs from it is the order a rival raids in, and that is the order the
+ * attack list is already computed in. Any divergence between the two means
+ * one of them is wrong and nothing says which.
+ */
+describe("exposure, scored as a rival scores us", () => {
+  function mine(over: Partial<Evaluated> = {}): Evaluated {
+    return player({
+      ownerTeamId: "me",
+      clauseDate: OPENED_ALREADY,
+      valueTrendDays: 7,
+      ...over,
+    });
+  }
+
+  function myContext(squad: Evaluated[], over: Partial<ClauseContext> = {}) {
+    return context({
+      allPlayers: squad,
+      squad,
+      starterIds: new Set(squad.map((p) => p.playerId)),
+      ...over,
+    });
+  }
+
+  it("orders by how soon each crosses, not by points per million", () => {
+    // Deliberately inverted against the old ordering: the cheap filler has by
+    // far the better points per million and is the least urgent of the three.
+    const crossed = mine({
+      playerId: "crossed",
+      name: "Unai López",
+      value: 10_870_000,
+      clausePrice: 9_870_000,
+      valueDelta: 1_870_000,
+      expectedPoints: 4,
+    });
+    const soon = mine({
+      playerId: "soon",
+      name: "Gerenabarrena",
+      value: 7_360_000,
+      clausePrice: 8_900_000,
+      valueDelta: 3_640_000,
+      expectedPoints: 4,
+    });
+    const filler = mine({
+      playerId: "filler",
+      name: "Filler",
+      value: 1_000_000,
+      clausePrice: 2_100_000,
+      valueDelta: 0,
+      expectedPoints: 4,
+    });
+    const report = runClauses(myContext([crossed, soon, filler]));
+
+    expect(report.exposed.map((e) => e.player.playerId)).toEqual([
+      "crossed",
+      "soon",
+      "filler",
+    ]);
+    expect(filler.pointsPerMillion).toBeGreaterThan(0);
+    expect(report.exposed[0].efficiency).toBeLessThan(
+      report.exposed[2].efficiency,
+    );
+  });
+
+  it("files each of ours in the tier a rival would file him under", () => {
+    const crossed = mine({
+      playerId: "crossed",
+      value: 10_870_000,
+      clausePrice: 9_870_000,
+      valueDelta: 1_870_000,
+    });
+    const closing = mine({
+      playerId: "closing",
+      value: 7_360_000,
+      clausePrice: 8_900_000,
+      valueDelta: 3_640_000,
+    });
+    const priced = mine({
+      playerId: "priced",
+      value: 1_000_000,
+      clausePrice: 2_100_000,
+      valueDelta: 0,
+    });
+    const report = runClauses(myContext([crossed, closing, priced]));
+
+    const tier = (id: string) =>
+      report.exposed.find((e) => e.player.playerId === id)!.tier;
+    expect(tier("crossed")).toBe("golden");
+    expect(tier("closing")).toBe("trend");
+    expect(tier("priced")).toBe("priced");
+    expect(
+      report.exposed.find((e) => e.player.playerId === "crossed")!.reason,
+    ).toContain("under his own");
+    expect(
+      report.exposed.find((e) => e.player.playerId === "closing")!.reason,
+    ).toMatch(/reaches it in about \d+ days/);
+  });
+
+  it("counts a clause under value as at risk even when no rival is thought to afford it", () => {
+    // Rival funds are reconstructed from a ledger that currently holds no
+    // prize money at all, so they are understated — in exactly the direction
+    // that makes the squad look safe. A clause at or under value is a reading
+    // off two published numbers, and a reading outranks an estimate.
+    const crossed = mine({
+      playerId: "crossed",
+      value: 90_000_000,
+      clausePrice: 80_000_000,
+      valueDelta: 1_000_000,
+    });
+    const report = runClauses(
+      myContext([crossed], { rivalFunds: [rival(1_000_000)] }),
+    );
+
+    expect(report.exposed[0].threats).toHaveLength(0);
+    expect(report.exposed[0].atRisk).toBe(true);
+  });
+
+  it("does not call a player at risk while his clause is shut", () => {
+    const crossed = mine({
+      playerId: "crossed",
+      value: 10_870_000,
+      clausePrice: 9_870_000,
+      valueDelta: 1_870_000,
+      clauseDate: OPENS_LATER,
+    });
+    const report = runClauses(myContext([crossed]));
+
+    expect(report.exposed[0].tier).toBe("golden");
+    expect(report.exposed[0].atRisk).toBe(false);
+  });
+
+  it("sorts a shut clause below an open one however cheap it looks", () => {
+    const shutAndCheap = mine({
+      playerId: "shut",
+      value: 12_000_000,
+      clausePrice: 9_000_000,
+      valueDelta: 2_000_000,
+      clauseDate: OPENS_LATER,
+      expectedPoints: 5,
+    });
+    const openAndDearer = mine({
+      playerId: "open",
+      value: 7_360_000,
+      clausePrice: 8_900_000,
+      valueDelta: 3_640_000,
+      expectedPoints: 4,
+    });
+    const report = runClauses(myContext([shutAndCheap, openAndDearer]));
+
+    expect(report.exposed[0].player.playerId).toBe("open");
+    expect(report.exposed[1].opportunity).toBeGreaterThan(
+      report.exposed[0].opportunity,
+    );
+  });
+
+  it("names our own crossed player in the headline beside the one we can take", () => {
+    const theirs = player({
+      playerId: "theirs",
+      name: "Luismi Cruz",
+      ownerTeamId: "rival",
+      value: 20_330_000,
+      clausePrice: 19_780_000,
+      clauseDate: OPENED_ALREADY,
+      expectedPoints: 5,
+    });
+    const ours = mine({
+      playerId: "ours",
+      name: "Unai López",
+      value: 10_870_000,
+      clausePrice: 9_870_000,
+      valueDelta: 1_870_000,
+    });
+    const report = runClauses(
+      context({
+        allPlayers: [theirs, ours],
+        squad: [ours],
+        starterIds: new Set(["ours"]),
+      }),
+    );
+
+    expect(report.headline).toContain("Luismi Cruz");
+    expect(report.headline).toContain("Unai López");
+    expect(report.headline).toContain("same position on your side");
+  });
+
+  it("still refuses to recommend a block on any of it", () => {
+    const crossed = mine({
+      playerId: "crossed",
+      value: 10_870_000,
+      clausePrice: 9_870_000,
+      valueDelta: 1_870_000,
+    });
+    const report = runClauses(myContext([crossed]));
+
+    expect(JSON.stringify(report)).not.toMatch(/block (him|this|now)/i);
+    expect(report.exposed[0].reason).not.toMatch(/should block|recommend/i);
   });
 });

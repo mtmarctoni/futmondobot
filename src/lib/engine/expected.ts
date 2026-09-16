@@ -303,6 +303,7 @@ export function evaluate(
 
   const trend = ctx.trends.get(input.playerId);
   const valueDelta = trend?.delta ?? 0;
+  const valueTrendDays = trend?.spanDays ?? 0;
 
   // A doubt still gets the basis alongside it: the number is now a discounted
   // projection rather than a zero, and the reader needs to see both halves.
@@ -352,6 +353,7 @@ export function evaluate(
     unavailableReason,
     availability,
     valueDelta,
+    valueTrendDays,
     sampleRounds: rounds,
     expectedPoints,
     pointsPerMillion: valueM > 0 ? expectedPoints / valueM : 0,

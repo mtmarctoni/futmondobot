@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { buildToday, type Action, type TodayInput } from "./today";
-import type { ClauseBet } from "./clauses";
+import type { ClauseBet, ExposedPlayer } from "./clauses";
 import type { DepartedPlayer } from "./departed";
 import type { Evaluated } from "./types";
 import { DEFAULT_RULES } from "./types";
@@ -33,6 +33,7 @@ function evaluated(over: Partial<Evaluated> = {}): Evaluated {
     unavailableReason: null,
     availability: "fit",
     valueDelta: 0,
+    valueTrendDays: 7,
     sampleRounds: 0,
     expectedPoints: 2,
     pointsPerMillion: 2,
@@ -411,6 +412,7 @@ describe("clause_bet actions", () => {
       ownerName: "Rival FC",
       ratio: 0.9,
       discount: -1_000_000,
+      daysToValue: 8,
       opportunity: 6,
       affordable: true,
       availableFrom: null,
@@ -497,6 +499,7 @@ describe("golden_clause actions", () => {
       ownerName: "Rival FC",
       ratio: 0.978,
       discount: -450_000,
+      daysToValue: 1,
       opportunity: 6.8,
       affordable: true,
       availableFrom: null,
@@ -551,6 +554,7 @@ describe("golden_clause actions", () => {
               ownerName: "Rival FC",
               ratio: 0.9,
               discount: -1_000_000,
+              daysToValue: 3,
               opportunity: 9,
               affordable: true,
               availableFrom: null,
@@ -632,5 +636,113 @@ describe("golden_clause actions", () => {
     const actions = goldenActions(many);
     expect(actions).toHaveLength(3);
     expect(actions.map((a) => a.playerId)).toEqual(["g1", "g2", "g3"]);
+  });
+});
+
+/**
+ * Our own squad going cheap is the one clause fact entirely outside our
+ * control, and the only one that gets worse while nobody looks: the clause is
+ * fixed at acquisition and the value under it keeps climbing. It earns a line
+ * on today's list — and no button, because blocking costs 200 mondos a player
+ * a week and nothing here spends them.
+ */
+describe("exposure actions", () => {
+  function exposed(over: Partial<ExposedPlayer> = {}): ExposedPlayer {
+    return {
+      player: evaluated({
+        playerId: "unai",
+        name: "Unai López",
+        value: 10_870_000,
+      }),
+      clausePrice: 9_870_000,
+      ratio: 1.101,
+      daysToValue: 0,
+      tier: "golden",
+      opportunity: 9,
+      efficiency: 0.5,
+      threats: [{ teamId: "rival", teamName: "Rival FC", funds: 50_000_000 }],
+      alreadyLocked: false,
+      availableFrom: null,
+      atRisk: true,
+      reason: "Clause 9.87M€ is 1.00M€ under his own 10.9M€ value.",
+      ...over,
+    };
+  }
+
+  it("names a player the market has already overtaken", () => {
+    const { actions } = buildToday(
+      input({ clauses: { ...NO_CLAUSES, exposed: [exposed()] } }),
+    );
+    const action = actions.find((a) => a.id === "exposed-unai");
+    expect(action).toBeDefined();
+    expect(action?.kind).toBe("info");
+    expect(action?.title).toContain("Unai López");
+    expect(action?.title).toContain("at or under his own value");
+  });
+
+  it("offers no button and asks for no money", () => {
+    const { actions } = buildToday(
+      input({ clauses: { ...NO_CLAUSES, exposed: [exposed()] } }),
+    );
+    const action = actions.find((a) => a.id === "exposed-unai");
+    expect(action?.automatable).toBeUndefined();
+    expect(action?.money).toBeUndefined();
+    expect(action?.detail).not.toMatch(/block/i);
+  });
+
+  it("says nothing about a player whose clause is comfortably priced", () => {
+    const { actions } = buildToday(
+      input({
+        clauses: {
+          ...NO_CLAUSES,
+          exposed: [exposed({ tier: "priced", daysToValue: null })],
+        },
+      }),
+    );
+    expect(actions.find((a) => a.id === "exposed-unai")).toBeUndefined();
+  });
+
+  it("says nothing about a player nobody can take today", () => {
+    const { actions } = buildToday(
+      input({
+        clauses: {
+          ...NO_CLAUSES,
+          exposed: [exposed({ atRisk: false, availableFrom: "2026-09-20T00:00:00.000Z" })],
+        },
+      }),
+    );
+    expect(actions.find((a) => a.id === "exposed-unai")).toBeUndefined();
+  });
+
+  it("ranks below a clause we could actually pay today", () => {
+    const { actions } = buildToday(
+      input({
+        clauses: {
+          ...NO_CLAUSES,
+          golden: [
+            {
+              tier: "golden",
+              player: evaluated({ playerId: "luismi", name: "Luismi Cruz" }),
+              clausePrice: 20_780_000,
+              ownerTeamId: "rival",
+              ownerName: "Rival FC",
+              ratio: 0.978,
+              discount: -450_000,
+              daysToValue: 1,
+              opportunity: 8,
+              affordable: true,
+              availableFrom: null,
+              clauseDateKnown: true,
+              reason: "Market price, not a premium.",
+            },
+          ],
+          exposed: [exposed()],
+        },
+      }),
+    );
+    const goldenIndex = actions.findIndex((a) => a.kind === "golden_clause");
+    const riskIndex = actions.findIndex((a) => a.id === "exposed-unai");
+    expect(goldenIndex).toBeGreaterThanOrEqual(0);
+    expect(riskIndex).toBeGreaterThan(goldenIndex);
   });
 });
