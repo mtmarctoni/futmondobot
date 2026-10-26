@@ -2,3 +2,15 @@ allowBuilds:
   esbuild: true
   sharp: false
   unrs-resolver: false
+
+overrides:
+  # 2026-10-25: minimatch 10.2.6 (via @typescript-eslint/typescript-estree)
+  # allows ^5.0.8, but `pnpm update brace-expansion` left 5.0.9 in place (the
+  # 1.x copy did move, to 1.1.21). 5.0.12 is the first 5.x fixing
+  # GHSA-6j4f-fj2g-mc7p, GHSA-qhr7-859c-m2p7 and GHSA-q2hr-2g5m-vwhr. Dev only.
+  brace-expansion@5: ^5.0.12
+  # 2026-10-25: vitest 4.1.12 accepts vite ^6 || ^7 || ^8, but `pnpm update vite`
+  # left 8.2.2 in place. GHSA-587h-7wmj-h5pm and five medium/low dev-server
+  # advisories are fixed in 8.2.4 and 8.3.3, while 8.3.0-8.3.2 are still
+  # vulnerable, so the floor is 8.3.3. Dev only (vitest).
+  vite@8: ^8.3.3
